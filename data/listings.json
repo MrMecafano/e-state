@@ -1,0 +1,8 @@
+[
+  {"id": "L-001", "title": "Bright 1-room flat near Chorsu", "district": "Shayxontohur", "rooms": 1, "area_m2": 38, "price_usd": 42000, "floor": 3, "floors_total": 9, "parking": false, "furnished": true, "metro_minutes": 6, "features": ["balcony", "renovated"]},
+  {"id": "L-002", "title": "Family 3-room in Chilonzor", "district": "Chilonzor", "rooms": 3, "area_m2": 78, "price_usd": 69000, "floor": 5, "floors_total": 9, "parking": true, "furnished": false, "metro_minutes": 10, "features": ["school nearby", "two balconies"]},
+  {"id": "L-003", "title": "New-build 2-room, Yunusobod", "district": "Yunusobod", "rooms": 2, "area_m2": 62, "price_usd": 78000, "floor": 7, "floors_total": 16, "parking": true, "furnished": false, "metro_minutes": 4, "features": ["elevator", "new building", "gym"]},
+  {"id": "L-004", "title": "Cosy 2-room, Mirzo Ulug'bek", "district": "Mirzo Ulug'bek", "rooms": 2, "area_m2": 55, "price_usd": 61000, "floor": 2, "floors_total": 4, "parking": false, "furnished": true, "metro_minutes": 15, "features": ["park view"]},
+  {"id": "L-005", "title": "Penthouse 4-room, Tashkent City", "district": "Shayxontohur", "rooms": 4, "area_m2": 160, "price_usd": 310000, "floor": 22, "floors_total": 22, "parking": true, "furnished": true, "metro_minutes": 5, "features": ["terrace", "concierge", "elevator"]},
+  {"id": "L-006", "title": "2-room near Minor metro", "district": "Yunusobod", "rooms": 2, "area_m2": 58, "price_usd": 83000, "floor": 4, "floors_total": 9, "parking": false, "furnished": false, "metro_minutes": 3, "features": ["renovated"]}
+]

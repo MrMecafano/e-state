@@ -1,0 +1,32 @@
+# When a PR merges, move every Jira ticket named in its title/branch to Done.
+# Needs repo secrets: JIRA_BASE_URL (https://xxx.atlassian.net), JIRA_EMAIL, JIRA_API_TOKEN.
+name: Jira sync
+on:
+  pull_request:
+    types: [closed]
+jobs:
+  done:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Transition Jira tickets to Done
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          TEXT: ${{ github.event.pull_request.title }} ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -eu
+          keys=$(echo "$TEXT" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | sort -u || true)
+          [ -z "$keys" ] && { echo "no Jira key in PR"; exit 0; }
+          for k in $keys; do
+            tid=$(curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_BASE_URL/rest/api/3/issue/$k/transitions" \
+              | python3 -c "import json,sys; t=[x['id'] for x in json.load(sys.stdin).get('transitions',[]) if x['to']['statusCategory']['key']=='done']; print(t[0] if t else '')")
+            if [ -n "$tid" ]; then
+              curl -s -o /dev/null -w "$k -> Done (%{http_code})\n" -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -X POST \
+                -H 'Content-Type: application/json' -d "{\"transition\":{\"id\":\"$tid\"}}" \
+                "$JIRA_BASE_URL/rest/api/3/issue/$k/transitions"
+            else
+              echo "$k: no Done transition available"
+            fi
+          done
