@@ -37,5 +37,22 @@ class IngestTest(unittest.TestCase):
         self.assertEqual([l.id for l in kb.available()], ["L-100"])
 
 
+
+class ReviewFixes(unittest.TestCase):
+    def test_line_above_price_does_not_merge(self):
+        l = parse_post("X-1", "Yunusobod, 2 xonali\nQavat: 4\n450$")
+        self.assertEqual(l.rent_usd, 450)
+
+    def test_thousands_separator_still_works(self):
+        self.assertEqual(parse_post("X-2", "Chilonzor 3 xonali 1 200 $").rent_usd, 1200)
+
+    def test_unfurnished_is_not_furnished(self):
+        self.assertNotIn("furnished", parse_post("X-3", "Sergeli 1 xonali mebelsiz 250$").amenities)
+        self.assertNotIn("furnished", parse_post("X-4", "Сергели 1-комн без мебели 250$").amenities)
+        self.assertIn("furnished", parse_post("X-5", "Sergeli 1 xonali mebel bor 250$").amenities)
+
+    def test_earliest_district_wins(self):
+        self.assertEqual(parse_post("X-6", "Uchtepa, Chilonzor chegarasida, 2 xonali 400$").district, "Uchtepa")
+
 if __name__ == "__main__":
     unittest.main()

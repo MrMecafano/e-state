@@ -33,7 +33,11 @@ AMENITIES = {
     "balcony": ("balkon", "балкон"),
 }
 
-_PRICE = re.compile(r"(\d[\d\s]{1,6})\s*(?:\$|usd|у\.е|dollar|доллар)|\$\s*(\d[\d\s]{1,6})", re.I)
+# One optional space as a thousands separator, never a newline: "2 400$" is 2400,
+# but "Qavat: 4\n450$" must stay 450.
+_PRICE = re.compile(r"(\d{1,3}(?: \d{3})?|\d{4,6}) ?(?:\$|usd|у\.е|dollar|доллар)|\$ ?(\d{1,3}(?: \d{3})?|\d{4,6})", re.I)
+# "mebelsiz" / "без мебели" mean the amenity is absent.
+_NEGATED = re.compile(r"siz\b")
 _ROOMS = re.compile(r"(\d)\s*[-\s]?(?:xonali|xona|хонали|хона|комн|room|-к\b)", re.I)
 _AREA = re.compile(r"(\d{2,3}(?:[.,]\d)?)\s*(?:m2|m²|м2|м²|kv\.?\s*m|кв\.?\s*м)", re.I)
 
@@ -42,13 +46,29 @@ def _num(s: str) -> int:
     return int(re.sub(r"\D", "", s))
 
 
+def _present(low: str, key: str) -> bool:
+    """True if the keyword occurs at least once without a negation ("-siz" after, "без" before)."""
+    for m in re.finditer(re.escape(key), low):
+        rest = re.match(r"\w*", low[m.end():]).group(0)
+        if rest.endswith("siz") or low[max(0, m.start() - 4):m.start()].strip().endswith("без"):
+            continue
+        return True
+    return False
+
+
+def _district(low: str) -> str:
+    """The district mentioned earliest in the post, not the first one in the table."""
+    hits = [(low.find(k), name) for name, keys in DISTRICTS.items() for k in keys if k in low]
+    return min(hits)[1] if hits else ""
+
+
 def parse_post(listing_id: str, text: str, post_url: str = "", photos: list[str] | None = None) -> Listing:
     low = text.lower()
     price = _PRICE.search(text)
     rooms = _ROOMS.search(text)
     area = _AREA.search(text)
-    district = next((name for name, keys in DISTRICTS.items() if any(k in low for k in keys)), "")
-    amenities = [name for name, keys in AMENITIES.items() if any(k in low for k in keys)]
+    district = _district(low)
+    amenities = [name for name, keys in AMENITIES.items() if any(_present(low, k) for k in keys)]
     title = text.strip().splitlines()[0][:80] if text.strip() else listing_id
     return Listing(
         id=listing_id,
