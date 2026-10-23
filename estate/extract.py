@@ -9,8 +9,10 @@ import re
 from .ingest import DISTRICTS
 from .matcher import Criteria
 
+# One optional space as a thousands separator, never a newline: a number on the
+# line above the budget must not merge into it (see ingest.py's _PRICE).
 _BUDGET = re.compile(
-    r"(\d[\d\s]{1,6})\s*(?:\$|usd|у\.е|dollar|доллар)|\$\s*(\d[\d\s]{1,6})", re.I)
+    r"(\d{1,3}(?: \d{3})?|\d{4,6}) ?(?:\$|usd|у\.е|dollar|доллар)|\$ ?(\d{1,3}(?: \d{3})?|\d{4,6})", re.I)
 _ROOMS_NUM = re.compile(r"(\d)\s*[-\s]?(?:xonali|xona|хонали|хона|комн|room)", re.I)
 _ROOM_WORDS = {
     1: ("bir xonali", "бир хонали", "однокомн", "одно комн", "studio", "студи"),
