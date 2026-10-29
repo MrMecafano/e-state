@@ -27,6 +27,44 @@ def kb(**changes):
 
 
 class IndependentCheckerSafetyTest(unittest.TestCase):
+    def test_owner_phone_with_uzbek_word_suffix_is_still_private(self):
+        for value in ("Call +998977778899ga", "+998 (97) 777-88-99ga yozing"):
+            with self.subTest(reply=value):
+                verdict = check(value, kb(), "+998977778899")
+                self.assertFalse(verdict.ok)
+                self.assertIn("owner phone of L-100 leaked", verdict.reasons)
+        self.assertFalse(check("Call +9989012345670ga", kb(), "+998901234567").ok)
+
+    def test_form_encoded_phone_query_is_still_private(self):
+        for value in ("https://example.test/?phone=%2B998+97+777+88+99",
+                      "https://example.test/?owner=Ali+Valiyev"):
+            with self.subTest(url=value):
+                self.assertFalse(check(value, kb(owner_name="Ali Valiyev")).ok)
+        # Form decoding must not erase the '+' needed to recognize short
+        # international numbers in ordinary, non-form prose.
+        self.assertFalse(check("Call +1234567", kb()).ok)
+        self.assertTrue(check("Call +998901234567", kb(), "+998901234567").ok)
+
+    def test_payment_instruction_does_not_require_a_money_noun(self):
+        for value in ("Please pay before viewing", "Pay to view it", "Please pay", "Prepay first"):
+            with self.subTest(reply=value):
+                self.assertFalse(check(value, kb()).ok)
+        for value in ("Please do not pay before viewing", "You do not need to pay before viewing",
+                      "You don't have to pay", "No need to pay", "We never ask clients to pay",
+                      "Pay attention to the room count", "Rent is $500/month"):
+            with self.subTest(refusal=value):
+                self.assertTrue(check(value, kb()).ok)
+
+    def test_nonstandard_bracketed_listing_ids_are_checked(self):
+        for changes in ({"status": "taken"}, {"area_m2": 0}):
+            with self.subTest(changes=changes):
+                k = kb(id="X-1", **changes)
+                self.assertFalse(check(format_listing(k.get("X-1")), k).ok)
+        self.assertFalse(check("Try [X-999]", kb()).ok)
+        self.assertFalse(check("Try [flat-unknown]", kb()).ok)
+        k = kb(id="X-1")
+        self.assertTrue(check(format_listing(k.get("X-1")), k).ok)
+
     def test_owner_phone_format_and_local_number_variations_are_blocked(self):
         for owner in ("+998977778899", "+998 (97) 777-88-99", "97 777 88 99"):
             for value in ("+998 (97) 777-88-99", "998-97-777-88-99", "(97) 777-88-99",
