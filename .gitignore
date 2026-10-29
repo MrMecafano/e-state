@@ -2,3 +2,12 @@ __pycache__/
 *.pyc
 .venv/
 .env
+.env.*
+!.env.example
+var/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.sqlite-*
+*.log
+models/
