@@ -20,6 +20,9 @@ _BRACKET_ID = re.compile(r"\[([^\[\]\r\n]+)\]")
 # Read the entire phone-shaped token, not a whitelisted substring of it.
 # Separators include parentheses, hyphens, NBSP and line-wrapped contacts.
 _PHONE = re.compile(r"(?<![\w+])\+?\d(?:[\d\s().\-–—]*\d)?(?!\d)")
+# Known private contacts remain private when joined to words such as 'tel'.
+# Use this broader scan only against owner facts, not to classify every ID/URL.
+_OWNER_PHONE = re.compile(r"(?<!\d)\+?\d(?:[\d\s().\-–—]*\d)?(?!\d)")
 _MONEY = re.compile(
     r"\b(?:money|deposit\w*|prepay\w*|payment\w*|cash|rent|advance|funds|"
     r"pul\w*|depozit\w*|zaklad\w*|avans\w*|oldindan|to'lov\w*|"
@@ -70,9 +73,9 @@ def _phone_key(token: str) -> str:
     return digits
 
 
-def _phones(text: str) -> set[str]:
+def _phones(text: str, *, embedded: bool = False) -> set[str]:
     result = set()
-    for match in _PHONE.finditer(text):
+    for match in (_OWNER_PHONE if embedded else _PHONE).finditer(text):
         token = match.group()
         digits = sum(c.isdecimal() for c in token)
         # Ordinary prices, dates, room/area figures and short post IDs aren't phones.
@@ -147,10 +150,11 @@ def check(reply: str, kb: KnowledgeBase, realtor_contact: str = "") -> Verdict:
     phones = {phone for text in phone_texts for phone in _phones(text)}
     allowed = _phones(_visible_text(realtor_contact))
     owners = set()
+    owner_candidates = {phone for text in phone_texts for phone in _phones(text, embedded=True)}
     for listing in listings:
-        owner_phones = _phones(_visible_text(listing.owner_phone))
+        owner_phones = _phones(_visible_text(listing.owner_phone), embedded=True)
         owners.update(owner_phones)
-        if phones & owner_phones:
+        if owner_candidates & owner_phones:
             reasons.append(f"owner phone of {listing.id} leaked")
         name = _visible_text(listing.owner_name).strip()
         if name:
