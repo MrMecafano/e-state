@@ -1,12 +1,14 @@
-# When a PR merges, move every Jira ticket named in its title/branch to Done.
-# Needs repo secrets: JIRA_BASE_URL (https://xxx.atlassian.net), JIRA_EMAIL, JIRA_API_TOKEN.
+# Opt-in only: Jira credentials/integration are intentionally deferred.
+# Enable JIRA_SYNC_ENABLED=true and label a COMPLETE Jira task's PR jira-done.
+# Partial requirement PRs must not transition a broader shared Jira task.
+# Required secrets: JIRA_BASE_URL (HTTPS), JIRA_EMAIL, JIRA_API_TOKEN.
 name: Jira sync
 on:
   pull_request:
     types: [closed]
 jobs:
   done:
-    if: github.event.pull_request.merged == true
+    if: github.event.pull_request.merged == true && vars.JIRA_SYNC_ENABLED == 'true' && contains(github.event.pull_request.labels.*.name, 'jira-done')
     runs-on: ubuntu-latest
     steps:
       - name: Transition Jira tickets to Done
@@ -17,13 +19,18 @@ jobs:
           TEXT: ${{ github.event.pull_request.title }} ${{ github.event.pull_request.head.ref }}
         run: |
           set -eu
+          if [ -z "$JIRA_BASE_URL" ] || [ -z "$JIRA_EMAIL" ] || [ -z "$JIRA_API_TOKEN" ]; then
+            printf '%s\n' 'Jira is not configured; skipping without transitions.'
+            exit 0
+          fi
+          case "$JIRA_BASE_URL" in https://*) ;; *) printf '%s\n' 'Jira requires HTTPS'; exit 1 ;; esac
           keys=$(echo "$TEXT" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | sort -u || true)
           [ -z "$keys" ] && { echo "no Jira key in PR"; exit 0; }
           for k in $keys; do
-            tid=$(curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_BASE_URL/rest/api/3/issue/$k/transitions" \
+            tid=$(curl --fail --silent --show-error --max-time 30 --proto '=https' -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_BASE_URL/rest/api/3/issue/$k/transitions" \
               | python3 -c "import json,sys; t=[x['id'] for x in json.load(sys.stdin).get('transitions',[]) if x['to']['statusCategory']['key']=='done']; print(t[0] if t else '')")
             if [ -n "$tid" ]; then
-              curl -s -o /dev/null -w "$k -> Done (%{http_code})\n" -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -X POST \
+              curl --fail --silent --show-error --max-time 30 --proto '=https' -o /dev/null -w "$k -> Done (%{http_code})\n" -u "$JIRA_EMAIL:$JIRA_API_TOKEN" -X POST \
                 -H 'Content-Type: application/json' -d "{\"transition\":{\"id\":\"$tid\"}}" \
                 "$JIRA_BASE_URL/rest/api/3/issue/$k/transitions"
             else
