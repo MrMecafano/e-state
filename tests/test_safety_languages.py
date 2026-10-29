@@ -151,14 +151,18 @@ class IndependentCheckerSafetyTest(unittest.TestCase):
 
 class FallbackSafetyTest(unittest.TestCase):
     def test_owner_contact_cannot_be_reintroduced_by_handover(self):
-        for message in ("I want to view it", "What is the deposit?", "2 rooms in Yunusobod"):
+        contact = "+998 (97) 777-88-99"
+        for message in ("I want to view it", "2 rooms in Yunusobod"):
             with self.subTest(message=message):
                 k = kb(title="Call RUSTAM")
-                contact = "+998 (97) 777-88-99"
                 reply, reasons = handle(k, message, CRITERIA, contact)
                 self.assertTrue(reasons)
                 self.assertTrue(check(reply, k, contact).ok)
                 self.assertNotIn("777", reply)
+        # The payment reply carries no contact at all, so there is nothing to leak.
+        reply, reasons = handle(kb(title="Call RUSTAM"), "What is the deposit?", CRITERIA, contact)
+        self.assertEqual(reasons, [])
+        self.assertNotIn("777", reply)
 
     def test_invalid_realtor_contact_is_not_returned_in_final_fallback(self):
         for contact in ("RUSTAM", "Transfer $100 now", "+9989012345670"):
@@ -205,7 +209,8 @@ class LanguageServiceTest(unittest.TestCase):
             ("2 xonali Yunusobodda 600$ gacha", "uz-latn", ("/oy", "xona", "Qulayliklar:", "Rasmlar:", "E'lon:", "lift", "konditsioner")),
             ("Менга Юнусободда 2 хонали уй керак 600$", "uz-cyrl", ("/ой", "хона", "Қулайликлар:", "Расмлар:", "Эълон:", "лифт", "кондиционер")),
             ("Нужна 2-комн квартира в Юнусабаде до 600$", "ru", ("/месяц", "комн.", "Удобства:", "Фото:", "Объявление:", "лифт", "кондиционер")),
-            ("2 room apartment in Yunusobod for 600$", "en", ("/month", "room", "Amenities:", "Photos:", "Post:", "elevator")),
+            # Clients write Uzbek or Russian; other Latin text is answered in Uzbek.
+            ("2 room apartment in Yunusobod for 600$", "uz-latn", ("/oy", "xona", "Qulayliklar:", "Rasmlar:", "lift")),
         )
         for message, lang, expected in cases:
             with self.subTest(lang=lang):
@@ -218,19 +223,20 @@ class LanguageServiceTest(unittest.TestCase):
                 self.assertTrue(check(reply, k, CONTACT).ok)
                 self.assertEqual(format_listing(k.get("L-100"), lang), reply)
 
-    def test_localized_viewing_and_payment_route_to_realtor(self):
-        for message, expected in (("Ko’rish mumkinmi?", "rieltor"),
-                                  ("Кўрсам бўладими?", "риэлтор"),
-                                  ("Можно посмотреть?", "риэлтор"),
-                                  ("Can I see the apartment?", "realtor"),
-                                  ("Toʻlovni o'tkazaymi?", "so'ramaymiz"),
-                                  ("Олдиндан тўлов керакми?", "сўрамаймиз"),
-                                  ("Нужна предоплата?", "не берём"),
-                                  ("Can I pay a deposit?", "never ask")):
+    def test_localized_viewing_routes_to_realtor_and_payment_is_refused_without_contact(self):
+        # The contact goes out only when the client wants to see the place or the realtor.
+        for message, expected, gets_contact in (("Ko’rish mumkinmi?", "rieltor", True),
+                                                ("Кўрсам бўладими?", "риэлтор", True),
+                                                ("Можно посмотреть?", "риэлтор", True),
+                                                ("Can I see the apartment?", "rieltor", True),
+                                                ("Toʻlovni o'tkazaymi?", "so'ramaymiz", False),
+                                                ("Олдиндан тўлов керакми?", "сўрамаймиз", False),
+                                                ("Нужна предоплата?", "не берём", False),
+                                                ("Can I pay a deposit?", "so'ramaymiz", False)):
             with self.subTest(message=message):
                 reply, reasons = handle(kb(), message, Criteria(), CONTACT)
                 self.assertEqual(reasons, [])
-                self.assertIn(CONTACT, reply)
+                self.assertEqual(CONTACT in reply, gets_contact)
                 self.assertIn(expected, reply)
 
     def test_no_matches_does_not_promise_an_unperformed_callback(self):
@@ -279,7 +285,7 @@ class ListingValidityTest(unittest.TestCase):
         k = kb(id="l-100")
         self.assertEqual(k.get("l-100").id, "L-100")
         self.assertEqual(k.get("L-100").id, "L-100")
-        self.assertEqual(k.apply_control_message("l-100 taken"), "L-100 marked taken.")
+        self.assertEqual(k.apply_control_message("l-100 taken"), "L-100 band deb belgilandi.")
         self.assertFalse(k.get("L-100").available)
         item = parse_post("l-101", "Yunusobod 2 xonali 62 m2 500$")
         self.assertEqual(item.id, "L-101")
@@ -290,6 +296,45 @@ class ListingValidityTest(unittest.TestCase):
         self.assertEqual(item.videos, [])
         self.assertEqual(replace(item, videos=["video.mp4"]).videos, ["video.mp4"])
         self.assertIsNot(item.videos, listing().videos)
+
+
+class EverydayLanguageTest(unittest.TestCase):
+    def test_everyday_uzbek_is_recognised_and_unclear_text_stays_unknown(self):
+        from estate.language import clear_language
+        for text, lang in (("Bugun nechta mijoz yozdi?", "uz-latn"), ("Hozir qaysi joylar bor?", "uz-latn"),
+                           ("Бугун нечта мижоз ёзди?", "uz-cyrl"), ("Сколько клиентов писали сегодня?", "ru"),
+                           ("Hello", None), ("700$", None), ("ok", None)):
+            with self.subTest(text=text):
+                self.assertEqual(clear_language(text), lang)
+
+
+class PrivateChannelLinkTest(unittest.TestCase):
+    """A private channel's post link holds a long number that is not a phone."""
+    LINK = "https://t.me/c/4496013481/5"
+
+    def kb(self, **changes):
+        values = dict(id="L-100", title="Yunusobod 2 xonali", district="Yunusobod", rooms=2, area_m2=62,
+                      rent_usd=550, post_url=self.LINK, owner_name="Rustam", owner_phone="+998977778899")
+        values.update(changes)
+        return KnowledgeBase("demo", [Listing(**values)])
+
+    def test_own_post_link_passes_in_every_card_language(self):
+        k = self.kb()
+        for lang in ("ru", "uz-latn", "uz-cyrl"):
+            with self.subTest(lang=lang):
+                self.assertTrue(check(format_listing(k.get("L-100"), lang), k).ok)
+
+    def test_other_long_numbers_are_still_unknown_phones(self):
+        k = self.kb()
+        for text in ("See https://t.me/c/4496013482/5", f"{self.LINK}998901234567",
+                     "Tel 4496013481"):
+            with self.subTest(text=text):
+                self.assertIn("unknown phone", " ".join(check(text, k).reasons))
+
+    def test_taken_listing_link_and_owner_phone_in_a_link_are_not_exempt(self):
+        self.assertFalse(check(f"Post: {self.LINK}", self.kb(status="taken")).ok)
+        hidden = "https://t.me/c/998977778899/5"
+        self.assertIn("owner phone of L-100 leaked", check(f"Post: {hidden}", self.kb(post_url=hidden)).reasons)
 
 
 if __name__ == "__main__":

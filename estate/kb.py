@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from .language import detect, normalize_text
+
 DEMO_DATA = Path(__file__).resolve().parent.parent / "data" / "listings.json"
 
 
@@ -44,9 +46,23 @@ class Listing:
 
 
 # Control-bot commands (F-05). Uzbek / Russian / English words for "taken" and "free".
-_TAKEN = r"(taken|band|bandi|олинди|занят[ао]?|сдан[ао]?)"
-_FREE = r"(available|free|bo'sh|бўш|свободн[ао])"
+_TAKEN = r"(taken|band|bandi|банд|банди|олинди|занят[ао]?|сдан[ао]?)"
+_FREE = r"(available|free|bo'sh|бўш|свободн[ао]|свободен)"
+# Replies to the realtor: taken, free, unknown ID, usage hint.
+_CONTROL_REPLIES = {
+    "uz-latn": ("{id} band deb belgilandi.", "{id} bo'sh deb belgilandi.",
+                "{id} raqamli e'lon topilmadi.", "Yozing: L-003 band yoki L-003 bo'sh"),
+    "uz-cyrl": ("{id} банд деб белгиланди.", "{id} бўш деб белгиланди.",
+                "{id} рақамли эълон топилмади.", "Ёзинг: L-003 банд ёки L-003 бўш"),
+    "ru": ("{id} отмечено как занятое.", "{id} отмечено как свободное.",
+           "Объявление {id} не найдено.", "Напишите: L-003 занято или L-003 свободно"),
+}
 _CMD = re.compile(rf"^\s*(?:(?P<id1>L-\d+)\s+(?P<s1>{_TAKEN}|{_FREE})|(?P<s2>{_TAKEN}|{_FREE})\s+(?P<id2>L-\d+))\s*$", re.I)
+
+
+def is_control_command(text: str) -> bool:
+    """A one-line "L-003 band" / "bo'sh L-003" style status command."""
+    return bool(_CMD.match(normalize_text(text)))
 
 
 class KnowledgeBase:
@@ -76,15 +92,24 @@ class KnowledgeBase:
         return [l for l in self._listings.values() if l.available and l.complete]
 
     def apply_control_message(self, text: str) -> str:
-        """Handle a one-line control-bot message like "L-003 taken" or "bo'sh L-003" (F-05)."""
-        m = _CMD.match(text)
+        """Handle a one-line control-bot message like "L-003 band" or "L-003 занято" (F-05).
+
+        The reply uses the language of the status word: Uzbek Latin, Uzbek Cyrillic or Russian.
+        """
+        # Normalizing also accepts the apostrophe variants phone keyboards type in "bo'sh".
+        m = _CMD.match(normalize_text(text))
         if not m:
-            return "Send: <listing id> taken | available, e.g. L-003 taken"
+            return _CONTROL_REPLIES[detect(text)][3]
         lid = (m.group("id1") or m.group("id2")).upper()
-        word = (m.group("s1") or m.group("s2")).lower()
+        word = m.group("s1") or m.group("s2")
+        if not re.search(r"[а-яёўқғҳ]", word):
+            lang = "uz-latn"
+        else:
+            lang = "uz-cyrl" if re.match(r"(банд|олинди|бўш)", word) else "ru"
+        taken, free, missing, _ = _CONTROL_REPLIES[lang]
         listing = self._listings.get(lid)
         if listing is None:
-            return f"No listing {lid} in your knowledge base."
+            return missing.format(id=lid)
         status = "taken" if re.fullmatch(_TAKEN, word, re.I) else "available"
         self._listings[lid] = replace(listing, status=status)
-        return f"{lid} marked {status}."
+        return (taken if status == "taken" else free).format(id=lid)

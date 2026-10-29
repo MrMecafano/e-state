@@ -162,14 +162,14 @@ class PersistentInstanceRegistryTest(unittest.TestCase):
         b.kb.add(Listing("L-001", "B", "B", 2, 60, 500))
         self.store.scope("a").record_message("telegram", "client", "user", "Only A", "1", 1)
         self.store.scope("b").record_message("telegram", "client", "user", "Only B", "1", 1)
-        self.assertEqual(a.kb.apply_control_message("L-001 taken"), "L-001 marked taken.")
+        self.assertEqual(a.kb.apply_control_message("L-001 taken"), "L-001 band deb belgilandi.")
         self.restart()
         a, b = self.registry.get("a"), self.registry.get("b")
         self.assertEqual(a.kb.available(), [])
         self.assertEqual(b.kb.get("L-001").status, "available")
         self.assertEqual(self.store.scope("a").history("telegram", "client")[0]["text"], "Only A")
         self.assertEqual(self.store.scope("b").history("telegram", "client")[0]["text"], "Only B")
-        self.assertEqual(a.kb.apply_control_message("bo'sh L-001"), "L-001 marked available.")
+        self.assertEqual(a.kb.apply_control_message("bo'sh L-001"), "L-001 bo'sh deb belgilandi.")
         self.restart()
         self.assertTrue(self.registry.get("a").kb.get("L-001").available)
 
@@ -177,8 +177,8 @@ class PersistentInstanceRegistryTest(unittest.TestCase):
         instance = self.create()
         listing = Listing("L-001", "Flat", "A", 2, 60, 500)
         instance.kb.add(listing)
-        self.assertIn("Send:", instance.kb.apply_control_message("hello"))
-        self.assertIn("No listing", instance.kb.apply_control_message("L-999 taken"))
+        self.assertIn("Yozing:", instance.kb.apply_control_message("hello"))
+        self.assertIn("topilmadi", instance.kb.apply_control_message("L-999 taken"))
         self.assertEqual(self.store.scope("a").listings(), [listing])
 
     def test_get_and_all_refresh_listings_written_through_another_connection(self):

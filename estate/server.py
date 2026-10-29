@@ -249,9 +249,14 @@ def main(argv: list[str] | None = None) -> int:
     from .voice import WhisperCppTranscriber
     transcriber = WhisperCppTranscriber.from_environment()
     from .media import MediaGateway
+    from .ai import ClaudeResponder
+    try:
+        responder = ClaudeResponder.from_environment()
+    except ImportError:
+        parser.error("ANTHROPIC_API_KEY is set but the anthropic package is not installed")
     registry = InstanceRegistry(store=store)
     service = EstateService(registry, stats, latency, transcriber=transcriber,
-                            media_gateway=MediaGateway.from_environment(registry))
+                            media_gateway=MediaGateway.from_environment(registry), responder=responder)
     app = Application(service, admin_token)
     server = HTTPServer((args.host, args.port), make_handler(app))
     try:

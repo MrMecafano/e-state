@@ -286,7 +286,7 @@ class EstateServiceIntegrationTest(ApplicationFixture):
         self.assertEqual(len(wire.calls), 2)
 
     def test_empty_safety_fallback_is_not_sent_or_counted_as_success(self):
-        with patch("estate.service.handle", return_value=("", ["synthetic safety rejection"])):
+        with patch("estate.agent.handle", return_value=("", ["synthetic safety rejection"])):
             result, = self.service.receive("a", "telegram", telegram())
         self.assertEqual(result.status, "blocked")
         self.assertEqual(self.wires["a", "telegram"].calls, [])
@@ -295,7 +295,7 @@ class EstateServiceIntegrationTest(ApplicationFixture):
         self.assertEqual(self.service.receive("a", "telegram", telegram())[0].status, "duplicate")
 
     def test_final_checker_prevents_unsafe_reply_before_wire_send(self):
-        with patch("estate.service.handle", return_value=("Call PrivateOwnera", [])):
+        with patch("estate.agent.handle", return_value=("Call PrivateOwnera", [])):
             with self.assertRaises(ValueError):
                 self.service.receive("a", "telegram", telegram())
         self.assertEqual(self.wires["a", "telegram"].calls, [])
@@ -322,7 +322,7 @@ class EstateServiceIntegrationTest(ApplicationFixture):
         self.service.audio_loader = Mock(side_effect=RuntimeError("synthetic_private_signed_url " + TG_TOKEN))
         result, = self.service.receive("a", "telegram", telegram(None, voice={"file_id": "synthetic_voice"}))
         self.assertEqual(result.status, "sent")
-        self.assertIn("Please send your request as text", result.reply)
+        self.assertIn("matn bilan yozing", result.reply)
         self.assertNotIn("synthetic_private", result.reply)
         self.assertNotIn(TG_TOKEN, result.reply)
         self.service.transcriber.transcribe.assert_not_called()
