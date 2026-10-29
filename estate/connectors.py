@@ -77,13 +77,14 @@ def _http(request: Request, *, timeout: float) -> tuple[int, bytes]:
         return status, b""
 
 
-def _post(platform: str, url: str, payload: dict, headers: dict, transport) -> dict:
+def _post(platform: str, url: str, payload: dict, headers: dict, transport,
+          timeout: float = _TIMEOUT) -> dict:
     # Construct/send/decode inside the boundary: urllib exceptions often quote a
     # URL containing Telegram's token, and JSON errors can quote raw body data.
     try:
         request = Request(url, json.dumps(payload).encode("utf-8"),
                           {"Content-Type": "application/json", **headers}, method="POST")
-        status, body = transport(request, timeout=_TIMEOUT)
+        status, body = transport(request, timeout=timeout)
         if type(status) is not int or not 200 <= status < 300:
             raise ValueError
         if not isinstance(body, bytes) or len(body) > _MAX_BODY:
@@ -316,16 +317,39 @@ class TelegramConnector:
         return [IncomingMessage(message_id, client_id, text, _timestamp(message.get("date")),
                                 tuple(attachments), is_listing=listing, post_url=post_url)]
 
-    def _call(self, method: str, payload: dict) -> dict | list:
+    def _call(self, method: str, payload: dict, timeout: float = _TIMEOUT) -> dict | list:
         result = _post("Telegram", f"https://api.telegram.org/bot{self._token}/{method}",
-                       payload, {}, self._transport)
+                       payload, {}, self._transport, timeout)
         value = result.get("result")
+        listed = method in {"sendMediaGroup", "getUpdates"}
         if (result.get("ok") is not True
-                or (method == "sendMediaGroup" and
-                    (not isinstance(value, list) or not value or not all(isinstance(x, dict) for x in value)))
-                or (method != "sendMediaGroup" and not isinstance(value, dict))):
+                or (listed and (not isinstance(value, list) or not all(isinstance(x, dict) for x in value)
+                                or (method == "sendMediaGroup" and not value)))
+                or (not listed and not isinstance(value, dict))):
             raise ConnectorError("Telegram API request failed")
         return value
+
+    def _require_credentials(self) -> None:
+        if not isinstance(self._token, str) or not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", self._token):
+            raise ValueError("Telegram bot credentials required")
+
+    def get_me(self) -> dict:
+        """Return the bot's own User object; a cheap check that the token works."""
+        self._require_credentials()
+        return self._call("getMe", {})
+
+    def get_updates(self, offset: int | None = None, timeout: int = 25) -> list[dict]:
+        """Long-poll for updates when no public webhook exists (local runs only).
+
+        Pass the last handled update_id + 1 as the next offset to confirm a batch.
+        Telegram refuses this while a webhook is set or another poller is running.
+        """
+        self._require_credentials()
+        payload = {"timeout": timeout, "allowed_updates": ["message", "channel_post"]}
+        if offset is not None:
+            payload["offset"] = offset
+        # The HTTP read must outlast Telegram's own long-poll wait.
+        return self._call("getUpdates", payload, timeout + _TIMEOUT)
 
     def _deliver(self, client_id: str, text: str, attachments: tuple[Attachment, ...]) -> dict | list:
         if not isinstance(self._token, str) or not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", self._token):

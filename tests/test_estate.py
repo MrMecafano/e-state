@@ -17,16 +17,16 @@ def kb():
 class KnowledgeBaseTest(unittest.TestCase):
     def test_f05_control_message_marks_taken_and_back(self):
         k = kb()
-        self.assertEqual(k.apply_control_message("L-003 taken"), "L-003 marked taken.")
+        self.assertEqual(k.apply_control_message("L-003 taken"), "L-003 band deb belgilandi.")
         self.assertFalse(k.get("L-003").available)
-        self.assertEqual(k.apply_control_message("bo'sh L-003"), "L-003 marked available.")
+        self.assertEqual(k.apply_control_message("bo'sh L-003"), "L-003 bo'sh deb belgilandi.")
         self.assertTrue(k.get("L-003").available)
 
     def test_f05_russian_and_unknown(self):
         k = kb()
-        self.assertEqual(k.apply_control_message("L-002 сдана"), "L-002 marked taken.")
-        self.assertIn("No listing", k.apply_control_message("L-999 taken"))
-        self.assertIn("Send:", k.apply_control_message("hello"))
+        self.assertEqual(k.apply_control_message("L-002 сдана"), "L-002 отмечено как занятое.")
+        self.assertIn("topilmadi", k.apply_control_message("L-999 taken"))
+        self.assertIn("Yozing:", k.apply_control_message("hello"))
 
     def test_n02_instances_are_isolated(self):
         a, b = kb(), KnowledgeBase("other")
@@ -65,7 +65,7 @@ class RepliesTest(unittest.TestCase):
 
     def test_f04_f12_card_has_details_but_no_owner(self):
         card = format_listing(kb().get("L-003"))
-        for part in ("$550/month", "Yunusobod", "2 room", "elevator", "https://t.me/estate_demo/103"):
+        for part in ("$550/month", "Yunusobod", "2 room", "elevator", "https://t.me/c/4496013481/5"):
             self.assertIn(part, card)
         self.assertNotIn("Rustam", card)
         self.assertNotIn("+998977778899", card)

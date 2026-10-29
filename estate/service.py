@@ -16,16 +16,18 @@ from typing import Callable
 from urllib.parse import parse_qs, quote, urlsplit
 
 from .admin import StatsLog
-from .agent import handle
+from .agent import respond
 from .checker import check
 from .connectors import Attachment, IncomingMessage, InstagramConnector, TelegramConnector
 from .extract import extract
 from .ingest import is_complete, parse_post
 from .instances import Instance, InstanceRegistry
-from .kb import Listing
-from .language import detect
+from .kb import Listing, is_control_command
+from .language import conversation_language, detect
 from .matcher import Criteria
-from .replies import HANDOVER, format_listing, wants_viewing
+from .ai import AIUnavailable
+from .replies import (HANDOVER, REALTOR_AI_HINT, REALTOR_CONFIRM, REALTOR_MENU, format_listing, is_no, is_start,
+                      is_yes, realtor_confirmation, realtor_listings, say)
 from .telemetry import LatencyLog
 
 
@@ -39,6 +41,8 @@ class ProcessResult:
     status: str
     reply: str = ""
     blocked: tuple[str, ...] = ()
+    ai: bool = False  # the model wrote this reply
+    note: str = ""    # why a model draft was not used; never holds secrets
 
 
 _TEXT_REQUIRED = {
@@ -46,6 +50,26 @@ _TEXT_REQUIRED = {
     "uz-cyrl": "Ҳозир овозли хабарни ўқий олмайман. Илтимос, сўровингизни матн билан ёзинг.",
     "ru": "Сейчас голосовое сообщение недоступно. Пожалуйста, напишите запрос текстом.",
     "en": "Voice transcription is unavailable. Please send your request as text.",
+}
+
+
+# Replies to the realtor's /publish command: usage, taken, checker, incomplete, done.
+_PUBLISH_REPLIES = {
+    "uz-latn": ("Yozing: /publish L-001, keyingi qatorda e'lon matni.",
+                "E'lon chiqarilmadi: bu joy band.",
+                "E'lon chiqarilmadi: xavfsizlik tekshiruvidan o'tmadi, matnni tekshiring.",
+                "E'londa tuman, xonalar soni, maydon (m2) va $ narx bo'lishi kerak.",
+                "E'lon kanalga joylandi."),
+    "uz-cyrl": ("Ёзинг: /publish L-001, кейинги қаторда эълон матни.",
+                "Эълон чиқарилмади: бу жой банд.",
+                "Эълон чиқарилмади: хавфсизлик текширувидан ўтмади, матнни текширинг.",
+                "Эълонда туман, хоналар сони, майдон (м2) ва $ нарх бўлиши керак.",
+                "Эълон каналга жойланди."),
+    "ru": ("Напишите: /publish L-001, а на следующей строке текст объявления.",
+           "Объявление не опубликовано: этот объект занят.",
+           "Объявление не опубликовано: не прошло проверку безопасности, проверьте текст.",
+           "В объявлении должны быть район, число комнат, площадь (м2) и цена в $.",
+           "Объявление опубликовано в канале."),
 }
 
 
@@ -61,13 +85,19 @@ class EstateService:
     def __init__(self, registry: InstanceRegistry, stats: StatsLog, latency: LatencyLog,
                  connectors: dict[tuple[str, str], object] | None = None,
                  transcriber=None, audio_loader: Callable | None = None,
-                 media_gateway=None, clock: Callable[[], float] = time.time) -> None:
+                 media_gateway=None, clock: Callable[[], float] = time.time,
+                 responder=None) -> None:
         if registry.store is None:
             raise ConfigurationError("The application requires a tenant store")
         self.registry, self.stats, self.latency = registry, stats, latency
         self._connectors = dict(connectors or {})
         self.transcriber, self.audio_loader, self.clock = transcriber, audio_loader, clock
         self.media_gateway = media_gateway
+        self.responder = responder  # optional estate.ai.ClaudeResponder; None means rules only
+        # Realtor assistant state, per (instance, realtor): recent chat, and one proposed
+        # status change waiting for "Ha" / "Yo'q". In memory: a restart forgets both.
+        self._realtor_chats: dict[tuple[str, str], list[dict]] = {}
+        self._pending_changes: dict[tuple[str, str], tuple[float, list[tuple[str, str]], str]] = {}
 
     def connector(self, instance: Instance, channel: str):
         key = (instance.id, channel)
@@ -187,13 +217,18 @@ class EstateService:
             raise ValueError("Invalid generated media capability")
         return attachment, self.media_gateway.base_url + path
 
-    def _deliver(self, connector, instance: Instance, event: IncomingMessage, reply: str, channel: str) -> None:
+    def _deliver(self, connector, instance: Instance, event: IncomingMessage, reply: str, channel: str,
+                 lang: str | None = None) -> None:
         # A listing card is delivered with its own media, not another property's album.
         ids = list(dict.fromkeys(re.findall(r"\[(L-\d+)\]", reply, re.I)))
-        if not ids:
-            if not check(reply, instance.kb, instance.realtor_contact).ok:
+        first_card = re.search(r"\[(L-\d+)\]", reply, re.I)
+        # Text before the first card (a model-written message) goes out on its own.
+        intro = reply[:first_card.start()].strip() if first_card else reply
+        if intro:
+            if not check(intro, instance.kb, instance.realtor_contact).ok:
                 raise ValueError("Final reply failed the independent checker")
-            connector.send(event.client_id, reply)
+            connector.send(event.client_id, intro)
+        if not ids:
             return
         for listing_id in ids:
             listing = instance.kb.get(listing_id.upper())
@@ -202,7 +237,8 @@ class EstateService:
             from .media import public_https_url
             if listing.post_url and not public_https_url(listing.post_url):
                 raise ValueError("Original post link is not a public HTTPS URL")
-            text = format_listing(listing, detect(event.text))
+            # Cards use the reply's language, which may come from earlier messages.
+            text = format_listing(listing, lang or detect(event.text))
             if not check(text, instance.kb, instance.realtor_contact).ok:
                 raise ValueError("Listing card failed the independent checker")
             attachments = self._attachments(listing)
@@ -230,21 +266,82 @@ class EstateService:
                     raise ValueError("Listing media failed the independent checker")
             connector.send(event.client_id, text, attachments)
 
-    def _control(self, instance: Instance, event: IncomingMessage, connector) -> str:
+    _CONFIRM_SECONDS = 600
+
+    def _stats_summary(self, instance_id: str) -> dict:
+        """Counts only: no client IDs or chat text go to the realtor assistant."""
+        totals = self.stats.stats(instance_id)
+        since = self.clock() - 86400
+        recent = [s for s in self.stats.sessions(instance_id) if s["started_at"] >= since]
+        return {"clients_total": totals.clients_served,
+                "viewing_or_realtor_requests_total": totals.handovers,
+                "closed_deals_total": totals.closed_deals,
+                "average_conversation_minutes": round(totals.avg_conversation_seconds / 60, 1),
+                "last_24_hours": {"conversations": len(recent),
+                                  "clients": len({(s["channel"], s["client_id"]) for s in recent}),
+                                  "viewing_or_realtor_requests": sum(s["handed_over"] for s in recent)}}
+
+    def _realtor_assistant(self, instance: Instance, key: tuple[str, str], text: str, lang: str) -> tuple[str, bool]:
+        """Model answer for a plain-language realtor message; changes wait for confirmation."""
+        chat = self._realtor_chats.setdefault(key, [])
+        try:
+            draft = self.responder.realtor_draft(instance.kb.all(), self._stats_summary(instance.id),
+                                                 chat, text, lang)
+        except AIUnavailable:
+            return say(REALTOR_MENU, lang), False
+        listings = {listing.id: listing for listing in instance.kb.all()}
+        changes = [(listing_id, status) for listing_id, status in dict.fromkeys(draft.changes)
+                   if listing_id in listings and listings[listing_id].available != (status == "available")]
+        reply = draft.reply
+        if changes:
+            self._pending_changes[key] = (self.clock(), changes, lang)
+            reply = (reply + "\n\n" if reply else "") + realtor_confirmation(listings, changes, lang)
+        reply = reply or say(REALTOR_MENU, lang)
+        chat.extend([{"role": "user", "text": text}, {"role": "assistant", "text": reply}])
+        del chat[:-20]
+        return reply, True
+
+    def _apply_changes(self, instance: Instance, changes: list[tuple[str, str]], lang: str) -> str:
+        # Reuse the command path (and its persistence) with words in the realtor's language.
+        _, taken, free, _, _ = REALTOR_CONFIRM["uz-latn" if lang == "both" else lang]
+        return "\n".join(instance.kb.apply_control_message(f"{listing_id} {taken if status == 'taken' else free}")
+                         for listing_id, status in changes)
+
+    def _control(self, instance: Instance, event: IncomingMessage, connector) -> tuple[str, bool]:
+        """Realtor messages: exact commands first, then confirmations, then the assistant."""
         text = event.text.strip()
+        key = (instance.id, event.client_id)
+        lang = conversation_language(text, self._realtor_chats.get(key, []))
+        pending = self._pending_changes.pop(key, None)
+        if pending and self.clock() - pending[0] <= self._CONFIRM_SECONDS:
+            if is_yes(text):
+                return self._apply_changes(instance, pending[1], pending[2]), False
+            if is_no(text):
+                return say({l: v[4] for l, v in REALTOR_CONFIRM.items()}, pending[2]), False
+        if text.split(" ", 1)[0].lower() == "/list":
+            return realtor_listings(instance.kb.all(), lang), False
         if not text.startswith("/publish "):
-            return instance.kb.apply_control_message(text)
+            if is_control_command(text):
+                return instance.kb.apply_control_message(text), False
+            if self.responder is None or is_start(text):
+                menu = say(REALTOR_MENU, lang)
+                return (menu + "\n\n" + say(REALTOR_AI_HINT, lang) if self.responder else menu), False
+            return self._realtor_assistant(instance, key, text, lang)
+        return self._publish(instance, event, connector, text), False
+
+    def _publish(self, instance: Instance, event: IncomingMessage, connector, text: str) -> str:
         first, separator, details = text.partition("\n")
+        usage, taken, unsafe, incomplete, published = _PUBLISH_REPLIES[detect(details or text)]
         listing_id = first[len("/publish "):].strip().upper()
         if not separator or not re.fullmatch(r"L-[0-9]+", listing_id):
-            return "Send /publish L-001 followed by listing details on the next line."
+            return usage
         existing = instance.kb.get(listing_id)
         if existing is not None and not existing.available:
-            return "Publication blocked: this listing is taken."
+            return taken
         # Check against the unchanged live privacy facts BEFORE inserting a
         # candidate with this ID, so duplicate IDs cannot erase owner metadata.
         if not check(details, instance.kb, instance.realtor_contact).ok:
-            return "Publication blocked by the safety checker; review the listing details."
+            return unsafe
         listing = parse_post(listing_id, details,
                              photos=[a.url for a in event.attachments if a.kind == "photo"])
         if existing is not None:
@@ -252,15 +349,15 @@ class EstateService:
                               owner_phone=existing.owner_phone, status=existing.status)
         listing = replace(listing, videos=[a.url for a in event.attachments if a.kind == "video"])
         if not is_complete(listing):
-            return "Publication needs a district, room count and monthly USD rent."
+            return incomplete
         card = format_listing(listing, detect(details))
         # Check against a temporary candidate without changing the tenant's live KB.
         from .kb import KnowledgeBase
         candidate_kb = KnowledgeBase(instance.id, instance.kb.all() + [listing])
         if not check(card, candidate_kb, instance.realtor_contact).ok:
-            return "Publication blocked by the safety checker; review the listing details."
+            return unsafe
         connector.publish(card, self._attachments(listing))
-        return "Published to the configured Telegram channel."
+        return published
 
     def process(self, instance_id: str, channel: str, event: IncomingMessage,
                 connector=None) -> ProcessResult:
@@ -278,8 +375,11 @@ class EstateService:
             if channel != "telegram":
                 raise ValueError("Unsupported listing event")
             # parse_update binds channel posts to the instance's configured channel.
+            # A post that names its own ID (e.g. "L-007") keeps it, so the realtor
+            # can later send "L-007 band"; otherwise derive a stable one.
+            named = re.search(r"(?<![\w-])L-(\d{1,6})(?!\w)", event.text, re.I)
             digest = int(hashlib.sha256(f"{channel}:{event.client_id}:{event.id}".encode()).hexdigest()[:15], 16)
-            listing = parse_post(f"L-{digest}", event.text, event.post_url,
+            listing = parse_post(f"L-{named.group(1)}" if named else f"L-{digest}", event.text, event.post_url,
                                  photos=[a.url for a in event.attachments if a.kind == "photo"])
             listing = replace(listing, videos=[a.url for a in event.attachments if a.kind == "video"])
             if is_complete(listing):
@@ -290,10 +390,10 @@ class EstateService:
             scope.mark_event_processed(channel, receipt_id)
             return ProcessResult(event.id, status)
         if channel == "telegram" and event.client_id in instance.telegram_admin_ids:
-            answer = self._control(instance, event, connector)
+            answer, ai = self._control(instance, event, connector)
             connector.send(event.client_id, answer)
             scope.mark_event_processed(channel, receipt_id)
-            return ProcessResult(event.id, "control", answer)
+            return ProcessResult(event.id, "control", answer, ai=ai)
         received = self._received_at(event)
         history = scope.history(channel, event.client_id)
         prior = next((item for item in history if item["role"] == "user" and item["message_id"] == event.id), None)
@@ -307,20 +407,23 @@ class EstateService:
         scope.record_message(channel, event.client_id, "user", text,
                              message_id=event.id, timestamp=received)
         self.stats.begin(instance_id, channel, event.client_id, session, at=started)
+        ai, note, lang = False, "", None
         if text:
-            reply, blocked = handle(instance.kb, text, self._criteria(active_history, text),
-                                    instance.realtor_contact)
+            turn = respond(instance.kb, text, self._criteria(active_history, text),
+                           instance.realtor_contact, responder=self.responder, history=active_history)
+            reply, blocked, handed_over, ai, note = turn.reply, turn.blocked, turn.handover, turn.ai, turn.note
+            lang = turn.lang
         else:
             reply, blocked = _TEXT_REQUIRED[detect(event.text)], []
-        handed_over = wants_viewing(text) or bool(blocked)
+            handed_over = False
         effective_event = replace(event, text=text)
         if not reply:
             self.latency.record(instance_id, channel, receipt_id, received,
                                 max(received, self.clock()), success=False)
             scope.mark_event_processed(channel, receipt_id)
-            return ProcessResult(event.id, "blocked", blocked=tuple(blocked))
+            return ProcessResult(event.id, "blocked", blocked=tuple(blocked), note=note)
         try:
-            self._deliver(connector, instance, effective_event, reply, channel)
+            self._deliver(connector, instance, effective_event, reply, channel, lang)
         except Exception:
             self.latency.record(instance_id, channel, receipt_id, received,
                                 max(received, self.clock()), success=False)
@@ -332,4 +435,4 @@ class EstateService:
                              message_id=("handover:" if handed_over else "reply:") + event.id,
                              timestamp=sent)
         scope.mark_event_processed(channel, receipt_id)
-        return ProcessResult(event.id, "sent", reply, tuple(blocked))
+        return ProcessResult(event.id, "sent", reply, tuple(blocked), ai, note)

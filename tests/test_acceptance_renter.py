@@ -20,6 +20,7 @@ import unittest
 from estate.agent import handle
 from estate.extract import extract
 from estate.kb import KnowledgeBase, Listing
+from estate.replies import _DISTRICT_NAMES
 
 CONTACT = "@demo_realtor"
 
@@ -47,7 +48,10 @@ class RenterAcceptanceCase(unittest.TestCase):
             # Check displayed facts, not just that a valid ID was mentioned.
             details = card.splitlines()[1]
             self.assertIn(f"${listing.rent_usd}/", details)
-            self.assertIn(f"| {listing.district} | {listing.rooms} ", details)
+            # Cyrillic cards show the district in their own script.
+            shown = details.split(" | ")[1]
+            self.assertIn(shown, (listing.district, *_DISTRICT_NAMES.get(listing.district, ())))
+            self.assertIn(f"| {listing.rooms} ", details)
             self.assertEqual(re.findall(r"https?://\S+", card), [listing.post_url])
 
     def assert_card_language(self, reply, lang):
@@ -59,7 +63,7 @@ class RenterAcceptanceCase(unittest.TestCase):
         for card in reply.split("\n\n"):
             lines = card.splitlines()
             self.assertGreaterEqual(len(lines), 4)
-            # Source titles and district names need not be translated. Only
+            # Source titles need not be translated. Only
             # the presentation controlled by the application is checked here.
             self.assertIn(f"/{month} |", lines[1])
             self.assertRegex(lines[1], rf"\| \d+ {re.escape(rooms)},")
@@ -83,7 +87,7 @@ class UC1NormalCourse(RenterAcceptanceCase):
         self.assert_card_language(reply, "uz-latn")
         self.assertEqual(
             re.findall(r"https?://\S+", reply),
-            ["https://t.me/estate_demo/105", "https://t.me/estate_demo/103"],
+            ["https://t.me/c/4496013481/7", "https://t.me/c/4496013481/5"],
         )
 
     def test_more_than_three_matches_returns_only_three(self):
@@ -146,11 +150,11 @@ class UC1AlternativeViewing(unittest.TestCase):
         self.assertIn(CONTACT, reply)
         self.assertNotRegex(reply, r"\[L-\d+\]")  # handed over, not a listing card
 
-    def test_russian_viewing_and_rent_requests_hand_over(self):
+    def test_russian_viewing_and_realtor_requests_hand_over(self):
         for msg in (
             "Хочу посмотреть двухкомнатную квартиру в Юнусабаде до 550 долларов",
-            "Хочу снять двухкомнатную квартиру в Юнусабаде до 550 долларов",
-            "Я арендую квартиру в Юнусабаде до 550 долларов",
+            "Хочу поговорить с риелтором",
+            "Как связаться с риелтором?",
         ):
             with self.subTest(message=msg):
                 reply, blocked = handle(kb(), msg, extract(msg), CONTACT)
@@ -158,6 +162,16 @@ class UC1AlternativeViewing(unittest.TestCase):
                 self.assertIn(CONTACT, reply)
                 self.assertIn("свяжитесь с риэлтором", reply)
                 self.assertNotRegex(reply, r"\[L-\d+\]")
+
+    def test_wanting_to_rent_or_see_options_is_a_search_not_a_handover(self):
+        for msg in ("Хочу снять двухкомнатную квартиру в Юнусабаде до 550 долларов",
+                    "Хочу посмотреть варианты: двухкомнатная в Юнусабаде до 550 долларов",
+                    "Yunusobodda 2 xonali 550$ gacha variantlarni ko'rsating"):
+            with self.subTest(message=msg):
+                reply, blocked = handle(kb(), msg, extract(msg), CONTACT)
+                self.assertEqual(blocked, [])
+                self.assertEqual(re.findall(r"\[(L-\d+)\]", reply), ["L-005", "L-003"])
+                self.assertNotIn(CONTACT, reply)
 
 
 class UC1Exceptions(unittest.TestCase):
@@ -174,7 +188,7 @@ class UC1Exceptions(unittest.TestCase):
         reply, blocked = handle(kb(), msg, extract(msg), CONTACT)
         self.assertEqual(blocked, [])
         self.assertIn("oldindan to'lov so'ramaymiz", reply)  # F-11
-        self.assertIn(CONTACT, reply)
+        self.assertNotIn(CONTACT, reply)  # the contact is only for viewings and realtor requests
 
     def test_russian_payment_questions_are_refused(self):
         for msg in ("Как перевести оплату?", "Нужен депозит?", "Нужно внести залог?"):
@@ -182,7 +196,7 @@ class UC1Exceptions(unittest.TestCase):
                 reply, blocked = handle(kb(), msg, extract(msg), CONTACT)
                 self.assertEqual(blocked, [])
                 self.assertIn("Мы не берём никакой предоплаты.", reply)
-                self.assertIn(CONTACT, reply)
+                self.assertNotIn(CONTACT, reply)
                 self.assertNotRegex(reply, r"\[L-\d+\]")
 
     def test_a_blocked_reply_falls_back_to_handover_not_to_silence(self):

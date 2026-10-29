@@ -23,7 +23,7 @@ class RuntimeRegressionTest(ApplicationFixture):
         calls = self.wires["a", "telegram"].calls
         self.assertEqual(len(calls), 2)
         self.assertTrue(all(call[1]["chat_id"] == "900" for call in calls))
-        self.assertTrue(all("blocked" in call[1]["text"].lower() for call in calls))
+        self.assertTrue(all("chiqarilmadi" in call[1]["text"].lower() for call in calls))
         self.assertEqual(instance.kb.get("L-001"), original)
 
     def test_publication_rejects_existing_taken_listing(self):
@@ -31,7 +31,7 @@ class RuntimeRegressionTest(ApplicationFixture):
         instance.kb.apply_control_message("L-001 taken")
         result, = self.service.receive("a", "telegram", telegram(
             "/publish L-001\nYunusobod, 2 xonali, 50 m2, 500$", client=900))
-        self.assertIn("taken", result.reply)
+        self.assertIn("band", result.reply)
         self.assertFalse(instance.kb.get("L-001").available)
         self.assertEqual(len(self.wires["a", "telegram"].calls), 1)
         self.assertEqual(self.wires["a", "telegram"].calls[0][1]["chat_id"], "900")
@@ -40,7 +40,7 @@ class RuntimeRegressionTest(ApplicationFixture):
         original = self.registry.get("a").kb.get("L-001")
         result, = self.service.receive("a", "telegram", telegram(
             "/publish L-001\nYunusobod, 2 xonali, 50 m2, 500$", client=900))
-        self.assertIn("Published", result.reply)
+        self.assertIn("kanalga joylandi", result.reply)
         self.assertEqual(self.wires["a", "telegram"].calls[0][1]["chat_id"], "@synthetic_a")
         self.assertEqual(self.registry.get("a").kb.get("L-001"), original)
 
@@ -65,7 +65,7 @@ class RuntimeRegressionTest(ApplicationFixture):
         self.assertNotIn(TG_TOKEN, str([call[1] for call in self.wires["a", "telegram"].calls]))
 
     def test_final_nonlisting_send_gate_rejects_credential_url(self):
-        with patch("estate.service.handle", return_value=(
+        with patch("estate.agent.handle", return_value=(
                 "Source https://cdn.example.com/a?access_token=synthetic_secret", [])):
             with self.assertRaises(ValueError):
                 self.service.receive("a", "telegram", telegram())
@@ -76,7 +76,7 @@ class RuntimeRegressionTest(ApplicationFixture):
         result, = self.service.receive("a", "telegram", telegram(
             "/publish L-007\nYunusobod, 2 xonali, 50 m2, 500$ "
             "https://cdn.example.com/a?access_token=synthetic_secret", client=900))
-        self.assertIn("blocked", result.reply.lower())
+        self.assertIn("chiqarilmadi", result.reply.lower())
         calls = self.wires["a", "telegram"].calls
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1]["chat_id"], "900")

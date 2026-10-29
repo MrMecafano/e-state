@@ -23,7 +23,7 @@ CS363 Software Project Management, team **F1**. Requirement IDs refer to SRD v2.
 | ACK-boundary first-reply measurements and offline 100-message benchmark | `telemetry`, `tools/benchmark_latency.py` | N-01 code instrumentation |
 
 Core runtime/tests use standard-library Python **3.11+**; no provider SDK or LLM
-key is required. Free-text extraction is deterministic, not a claim of LLM/RAG
+key is required (AI replies are optional, see below). Free-text extraction is deterministic, not a claim of LLM/RAG
 coverage for arbitrary wording. Controlled labels are translated; source titles
 and place spellings are not fabricated translations.
 
@@ -32,9 +32,12 @@ and place spellings are not fabricated translations.
 ```sh
 python -m unittest discover -s tests -t . -v
 python tools/benchmark_latency.py --messages 100
-python -m estate.cli chat "2 xonali Yunusobodda 600$ gacha" --budget 600 --district Yunusobod --rooms 2
-python -m estate.cli control "L-003 taken"
+python -m estate.cli chat "2 xonali Yunusobodda 600$ gacha"
+python -m estate.cli control "L-003 band"
 ```
+
+`chat` reads budget, district and rooms from the message; `--budget`,
+`--district` and `--rooms` only override what it found.
 
 Connector tests inject HTTP transports, voice tests inject a local process runner,
 and application tests use synthetic data. They do **not** contact Telegram,
@@ -43,10 +46,90 @@ Instagram, Jira or a transcription provider. The benchmark actually processes
 platform delivery, end-to-end API latency or 24/7 availability. A successful send
 is recorded by the runtime only after the connector returns a platform ACK.
 
+## Laptop demo bot (real Telegram chat, no server)
+
+`estate.polling` runs one demo realtor's bot on a laptop with Telegram long
+polling, so no public URL or webhook is needed. It is a demo runner, not the
+deployment path, and it starts fresh from `data/listings.json` in memory on
+every run (nothing is written to disk).
+
+1. In Telegram, message **@BotFather**, send `/newbot`, and copy the token.
+2. `cp .env.example .env` and fill in the four `ESTATE_DEMO_*` lines. `.env` is
+   git-ignored; never commit or share the token.
+3. Run `python3 -m estate.polling` from the repository root and open the
+   `t.me` link it prints.
+
+The realtor and the client must be **different Telegram accounts**: messages
+from `ESTATE_DEMO_REALTOR_IDS` are treated as commands (`L-003 band`,
+`L-003 занято`), not questions. To find the realtor's ID, start the bot with the line blank, message
+it from the realtor's account, and copy the number the terminal shows.
+
+Conversation order: the bot first asks for district, rooms and monthly budget,
+then lists up to three places, and gives the realtor's contact only when the
+client asks to see a place or to talk to the realtor ("show me the options" is a
+search, not a viewing). Payment questions are refused without a contact.
+
+Each reply uses one language, the client's: Uzbek (Latin or Cyrillic) or
+Russian, cards and listing titles included (titles are stored as
+`Uzbek / Russian`). A message with no clear language (`700$`) keeps the client's
+earlier language. Only before the client has shown one (`/start`, an English
+first message) does the bot answer in Uzbek and Russian together.
+
+The demo channel: add the bot to a channel as an admin and set
+`ESTATE_DEMO_CHANNEL` to its numeric ID (`-100...`; post anything in the channel
+and the ID appears in the bot's updates). `python3 tools/post_demo_listings.py`
+prints the demo listings as Uzbek + Russian e'lons; `--send` posts them and
+saves each post link in `data/listings.json`. Telegram does not let a bot read
+old channel posts, so the bot starts from that file and learns **new** posts
+while it runs. A post that contains its ID (`🆔 L-007`) keeps that ID, so the
+realtor can send `L-007 band`; any other post gets a long generated ID.
+
+The demo listings' photos are local file names, which Telegram cannot send, so
+those cards go out as text. To show real photos, post a new e'lon with a photo
+in the channel, for example `Chilonzor, 2 xonali, 60 m2, 450$` plus `🆔 L-007`.
+Only one copy of the bot can poll at a time; stop the other one if the terminal
+says Telegram is unreachable.
+
+If it says Python cannot check Telegram's security certificate, that `python3`
+(often the python.org installer) has no certificates installed. Use another
+Python, such as Homebrew's `python3.12 -m estate.polling`, or run
+`Install Certificates.command` from that Python's folder in Applications.
+
+## AI replies (optional)
+
+With `ANTHROPIC_API_KEY` set, Claude writes the reply to normal rental
+questions, so clients can use their own wording ("Yunusobod tomonda arzonroq
+narsa bormi?"). Without it, the rule-based replies above are used.
+
+- **What is sent:** every free listing of that realtor (id, title, district,
+  rooms, area, rent, amenities, photo count, post link) plus the client's
+  current conversation. Owner names and phones are never sent. There is no
+  retrieval step yet; the plan is to move to RAG and send only matching listings.
+- **What stays in code:** listing cards, photos and links come from the
+  knowledge base, not from the model. Code picks the reply language and rejects
+  a draft that lists places before district, rooms and budget are known. The
+  model never sees the realtor's contact; code adds it only to a handover.
+  `/start` and payment questions keep fixed replies. Every model draft passes
+  the same independent checker, and a failed, slow (30 s) or rejected draft is
+  replaced by the rule-based reply. The bot log says which one answered.
+- **Model and cost:** `claude-opus-5-5` at low effort by default (change with
+  `ESTATE_AI_MODEL`); each reply is billed to the key's Anthropic account.
+  Server-side refusal fallbacks are on for models that support them.
+- **Setup:** the SDK needs Python 3.10+. Homebrew's Python blocks a global
+  `pip install`, so use the project's git-ignored virtual environment:
+
+  ```sh
+  python3.12 -m venv .venv
+  .venv/bin/pip install anthropic
+  .venv/bin/python -m estate.polling
+  ```
+
+Tests never call the API; they inject a fake client.
+
 ## Operator setup (not deployed)
 
-All values in `.env.example` are intentionally blank. The application does not
-implicitly source dotenv files. Export values through your own secret manager or
+All values in `.env.example` are intentionally blank. The server does not
+source dotenv files (only the laptop demo bot reads `.env`). Export values through your own secret manager or
 process supervisor; never commit them. Do not reuse credentials from another
 project. Tenant records store credential **environment-variable names**, not
 credential values.
@@ -80,9 +163,20 @@ or userbot is used.
 Only configured `telegram_admin_ids` can issue control commands through Telegram:
 
 ```text
-L-003 taken
-bo'sh L-003
+L-003 band        (or: L-003 банд, L-003 занято, L-003 taken)
+bo'sh L-003       (or: L-003 бўш, L-003 свободно)
 ```
+
+The reply comes back in the language of the status word. `/list` shows every listing with
+its status, and `/start` shows a command menu (never a client reply).
+
+With AI replies on, the realtor can also write plain sentences ("Minor metrodagi
+uy ijaraga berildi", "Сколько клиентов писали сегодня?", "e'lon yozib ber"). The
+assistant sees every listing with its status and client counts (no owner
+details, client IDs or chats), answers questions and drafts e'lons. It only
+*proposes* status changes: the bot asks "Ha / Yo'q" and changes nothing until
+the realtor confirms within 10 minutes. Exact commands, `/list`, `/start` and the
+confirmation itself never go to the model.
 
 Publication syntax (new listing details on the next line):
 

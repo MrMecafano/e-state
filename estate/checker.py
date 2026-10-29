@@ -45,6 +45,8 @@ _NEGATED_ACTION = re.compile(
 # Exclude ordinary non-monetary idioms rather than banning all uses of the word.
 _PAY = re.compile(r"\b(?:pay|prepay)\b(?!\s+(?:attention|respect|tribute|a visit)\b)")
 _NEGATED_REQUIRED = re.compile(r"(?:\b(?:no|not|never|without|не|никакой|без)|\bisn't|\baren't)\s*$")
+# A Telegram post link: public (t.me/<channel>/<post>) or private (t.me/c/<number>/<post>).
+_TELEGRAM_POST = re.compile(r"https://t\.me/(?:c/[0-9]+|[A-Za-z][A-Za-z0-9_]{4,31})/[0-9]+")
 _CLAUSES = re.compile(r"(?<!\d)\.|\.(?!\d)|[!?;]|\b(?:but|however|но|однако|lekin|ammo|лекин|аммо)\b")
 
 
@@ -147,7 +149,17 @@ def check(reply: str, kb: KnowledgeBase, realtor_contact: str = "") -> Verdict:
     valid_ids = {listing.id.upper() for listing in listings if listing.available and listing.complete}
     phone_texts = {_ID.sub(lambda match: " " if match.group().upper() in valid_ids else match.group(), text)
                    for text in texts}
-    phones = {phone for text in phone_texts for phone in _phones(text)}
+    # A listing's own post link is structural too: the number in a private-channel
+    # link is not a phone. Owner checks below still read the links in full.
+    links = {_visible_text(listing.post_url) for listing in listings
+             if listing.available and listing.complete and isinstance(listing.post_url, str)
+             and _TELEGRAM_POST.fullmatch(listing.post_url)}
+    unknown_texts = set()
+    for text in phone_texts:
+        for link in links:
+            text = text.replace(link, " ")
+        unknown_texts.add(text)
+    phones = {phone for text in unknown_texts for phone in _phones(text)}
     allowed = _phones(_visible_text(realtor_contact))
     owners = set()
     owner_candidates = {phone for text in phone_texts for phone in _phones(text, embedded=True)}
