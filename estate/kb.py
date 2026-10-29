@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -23,6 +24,19 @@ class Listing:
     owner_name: str = ""   # private: never shown to clients (F-12)
     owner_phone: str = ""  # private: never shown to clients (F-12)
     status: str = "available"  # "available" | "taken"
+    videos: list[str] = field(default_factory=list)  # appended for positional compatibility
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", self.id.strip().upper())
+
+    @property
+    def complete(self) -> bool:
+        """Incomplete posts stay in the KB for correction, never in recommendations."""
+        return (isinstance(self.title, str) and bool(self.title.strip())
+                and isinstance(self.district, str) and bool(self.district.strip())
+                and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                        and math.isfinite(value) and value > 0
+                        for value in (self.rooms, self.area_m2, self.rent_usd)))
 
     @property
     def available(self) -> bool:
@@ -52,14 +66,14 @@ class KnowledgeBase:
         self._listings[listing.id] = listing
 
     def get(self, listing_id: str) -> Listing | None:
-        return self._listings.get(listing_id)
+        return self._listings.get(listing_id.strip().upper())
 
     def all(self) -> list[Listing]:
         return list(self._listings.values())
 
     def available(self) -> list[Listing]:
         """Only these may ever be offered to a client (F-06)."""
-        return [l for l in self._listings.values() if l.available]
+        return [l for l in self._listings.values() if l.available and l.complete]
 
     def apply_control_message(self, text: str) -> str:
         """Handle a one-line control-bot message like "L-003 taken" or "bo'sh L-003" (F-05)."""

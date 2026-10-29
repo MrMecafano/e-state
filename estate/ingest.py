@@ -84,5 +84,5 @@ def parse_post(listing_id: str, text: str, post_url: str = "", photos: list[str]
 
 
 def is_complete(listing: Listing) -> bool:
-    """A listing missing price, district or rooms is held for the realtor to fix, not offered."""
-    return bool(listing.rent_usd and listing.district and listing.rooms)
+    """Hold posts missing mandatory card fields (including area) for correction."""
+    return listing.complete
