@@ -198,11 +198,54 @@ def _validate_content(text: str, attachments: tuple[Attachment, ...], *, telegra
             raise ValueError("Unsupported or unsafe attachment")
 
 
+def _utf8_chunks(text: str, limit: int = 1000) -> list[str]:
+    """Split without losing whitespace or cutting a Unicode code point."""
+    chunks = []
+    start = size = 0
+    try:
+        for index, character in enumerate(text):
+            width = len(character.encode("utf-8"))
+            if size + width > limit:
+                chunks.append(text[start:index])
+                start, size = index, 0
+            size += width
+    except UnicodeError:
+        raise ValueError("Instagram text must be valid UTF-8") from None
+    if start < len(text):
+        chunks.append(text[start:])
+    return chunks
+
+
 class TelegramConnector:
     def __init__(self, token: str, channel: str = "", transport=None):
         self._token = token
         self.channel = channel
         self._transport = transport if transport is not None else _http
+        self._resolved_channel: tuple[str, str] | None = None
+
+    def resolve_channel(self) -> str:
+        """Explicitly resolve an @alias with getChat and pin its numeric channel ID.
+
+        Call during credential-configured startup, before processing updates.
+        Numeric channels need no lookup or credentials. Successful alias lookups
+        are cached for this configuration; parsing never performs network work.
+        """
+        if not isinstance(self.channel, str):
+            raise ValueError("Telegram channel required")
+        if re.fullmatch(r"-?[0-9]+", self.channel):
+            return self.channel
+        if not self.channel.startswith("@") or not _USERNAME.fullmatch(self.channel[1:]):
+            raise ValueError("Telegram channel required")
+        if self._resolved_channel and self._resolved_channel[0] == self.channel.casefold():
+            return self._resolved_channel[1]
+        if not isinstance(self._token, str) or not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", self._token):
+            raise ValueError("Telegram bot credentials required")
+        chat = self._call("getChat", {"chat_id": self.channel})
+        if chat.get("type") != "channel" or type(chat.get("id")) is not int or chat["id"] >= 0:
+            raise ConnectorError("Telegram channel lookup failed")
+        channel_id = str(chat["id"])
+        self._resolved_channel = (self.channel.casefold(), channel_id)
+        return channel_id
 
     @staticmethod
     def verify_webhook(headers: Mapping[str, str], secret: str) -> bool:
@@ -220,6 +263,8 @@ class TelegramConnector:
             return False
         if re.fullmatch(r"-?[0-9]+", self.channel):
             return self.channel == _id(chat.get("id"))
+        if self._resolved_channel and self._resolved_channel[0] == self.channel.casefold():
+            return self._resolved_channel[1] == _id(chat.get("id"))
         username = _text(chat.get("username"))
         return (self.channel.startswith("@") and bool(_USERNAME.fullmatch(self.channel[1:]))
                 and bool(_USERNAME.fullmatch(username))
@@ -317,7 +362,10 @@ class TelegramConnector:
         """
         if not isinstance(self.channel, str) or not re.fullmatch(r"-?[0-9]+|@[A-Za-z0-9_]{5,32}", self.channel):
             raise ValueError("Telegram channel required")
-        return self._deliver(self.channel, text, attachments)
+        channel = self.channel
+        if self._resolved_channel and self._resolved_channel[0] == channel.casefold():
+            channel = self._resolved_channel[1]
+        return self._deliver(channel, text, attachments)
 
 
 class InstagramConnector:
@@ -375,6 +423,7 @@ class InstagramConnector:
         return messages
 
     def send(self, client_id: str, text: str, attachments: tuple[Attachment, ...] = ()) -> None:
+        """Send UTF-8 text chunks of at most 1000 bytes, then attachments in order."""
         if (not isinstance(self._token, str) or not re.fullmatch(r"[!-~]+", self._token)
                 or not isinstance(self.account_id, str) or not re.fullmatch(r"[0-9]+", self.account_id)):
             raise ValueError("Instagram account ID and credentials required")
@@ -383,7 +432,7 @@ class InstagramConnector:
         if not isinstance(client_id, str) or not re.fullmatch(r"[0-9]+", client_id):
             raise ValueError("Instagram recipient ID required")
         _validate_content(text, attachments, telegram=False)
-        parts = [{"text": text}] if text else []
+        parts = [{"text": chunk} for chunk in _utf8_chunks(text)]
         parts.extend({"attachment": {"type": "image" if a.kind == "photo" else "video",
                                       "payload": {"url": a.url}}} for a in attachments)
         for message in parts:

@@ -292,6 +292,106 @@ class InstagramParsingTest(unittest.TestCase):
             self.assertIsNone(self.connector.parse_update(instagram_update(instagram_event(timestamp=timestamp)))[0].timestamp)
 
 
+class TelegramChannelResolutionTest(unittest.TestCase):
+    @staticmethod
+    def chat_response(**changes):
+        chat = {"id": -1001234567890, "type": "channel", "title": "Estate",
+                "username": "Primary_Estate", "active_usernames": ["Primary_Estate", "Rental_Alias"]}
+        chat.update(changes)
+        return 200, json.dumps({"ok": True, "result": chat}).encode()
+
+    def test_collectible_alias_explicit_getchat_resolution_and_cache(self):
+        transport = FakeTransport(self.chat_response())
+        connector = TelegramConnector(TG_TOKEN, "@Rental_Alias", transport)
+        payload = telegram_post(chat={"id": -1001234567890, "type": "channel", "username": "Primary_Estate"})
+        self.assertEqual(connector.parse_update(payload), [])
+        self.assertEqual(transport.calls, [])
+        self.assertEqual(connector.resolve_channel(), "-1001234567890")
+        self.assertEqual(transport.calls, [{
+            "url": f"https://api.telegram.org/bot{TG_TOKEN}/getChat", "method": "POST",
+            "headers": {"content-type": "application/json"},
+            "body": {"chat_id": "@Rental_Alias"}, "timeout": 10.0}])
+        message = connector.parse_update(payload)[0]
+        self.assertTrue(message.is_listing)
+        self.assertEqual(message.post_url, "https://t.me/Primary_Estate/73")
+        self.assertEqual(connector.resolve_channel(), "-1001234567890")
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_resolved_id_accepts_missing_or_changed_primary_username(self):
+        transport = FakeTransport(self.chat_response())
+        connector = TelegramConnector(TG_TOKEN, "@Rental_Alias", transport)
+        connector.resolve_channel()
+        for extra in ({}, {"username": "Changed_Primary"}):
+            payload = telegram_post(chat={"id": -1001234567890, "type": "channel", **extra})
+            self.assertEqual(len(connector.parse_update(payload)), 1)
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_wrong_channel_cannot_match_resolved_alias_even_with_same_username(self):
+        connector = TelegramConnector(TG_TOKEN, "@Rental_Alias", FakeTransport(self.chat_response()))
+        connector.resolve_channel()
+        for username in ("Rental_Alias", "Primary_Estate"):
+            payload = telegram_post(chat={"id": -1009999999999, "type": "channel", "username": username})
+            self.assertEqual(connector.parse_update(payload), [])
+
+    def test_numeric_channel_needs_no_lookup_or_credentials(self):
+        transport = FakeTransport()
+        connector = TelegramConnector("", "-1001234567890", transport)
+        self.assertEqual(connector.resolve_channel(), "-1001234567890")
+        self.assertTrue(connector.parse_update(telegram_post())[0].is_listing)
+        self.assertEqual(transport.calls, [])
+
+    def test_missing_credentials_or_invalid_configuration_rejected_without_network(self):
+        transport = FakeTransport()
+        for token, channel in (("", "@Rental_Alias"), ("123:unsafe/token", "@Rental_Alias"),
+                               (TG_TOKEN, ""), (TG_TOKEN, "https://t.me/Rental_Alias")):
+            connector = TelegramConnector(token, channel, transport)
+            with self.assertRaises(ValueError):
+                connector.resolve_channel()
+        self.assertEqual(transport.calls, [])
+
+    def test_lookup_errors_are_sanitized_and_do_not_poison_retry(self):
+        private = f"RAW_PRIVATE_SERVER_BODY {TG_TOKEN}"
+        for response in ((400, json.dumps({"ok": False, "error_code": 400, "description": private}).encode()),
+                         (200, json.dumps({"ok": False, "description": private}).encode()),
+                         TimeoutError(private), URLError(private)):
+            transport = FakeTransport(response, self.chat_response())
+            connector = TelegramConnector(TG_TOKEN, "@Rental_Alias", transport)
+            with self.subTest(response_type=type(response)), self.assertRaises(ConnectorError) as caught:
+                connector.resolve_channel()
+            formatted = "".join(traceback.format_exception(type(caught.exception), caught.exception,
+                                                           caught.exception.__traceback__))
+            self.assertNotIn(TG_TOKEN, formatted)
+            self.assertNotIn("RAW_PRIVATE_SERVER_BODY", formatted)
+            self.assertEqual(connector.resolve_channel(), "-1001234567890")
+            self.assertEqual(len(transport.calls), 2)
+
+    def test_getchat_must_identify_a_channel_with_numeric_id(self):
+        for changes in ({"type": "supergroup"}, {"type": "private"}, {"id": None},
+                        {"id": "-1001234567890"}, {"id": True}, {"id": 12345}):
+            connector = TelegramConnector(TG_TOKEN, "@Rental_Alias", FakeTransport(self.chat_response(**changes)))
+            with self.subTest(changes=changes), self.assertRaisesRegex(ConnectorError, "channel lookup failed"):
+                connector.resolve_channel()
+
+    def test_changing_configured_alias_does_not_reuse_previous_pin(self):
+        transport = FakeTransport(self.chat_response(), self.chat_response(id=-1009999999999))
+        connector = TelegramConnector(TG_TOKEN, "@Rental_Alias", transport)
+        connector.resolve_channel()
+        connector.channel = "@Another_Alias"
+        self.assertEqual(connector.parse_update(telegram_post()), [])
+        self.assertEqual(connector.resolve_channel(), "-1009999999999")
+        self.assertEqual(connector.parse_update(telegram_post()), [])
+        self.assertEqual(len(transport.calls), 2)
+
+    def test_publishing_after_resolution_uses_pinned_id_without_another_lookup(self):
+        transport = FakeTransport(self.chat_response())
+        connector = TelegramConnector(TG_TOKEN, "@Rental_Alias", transport)
+        connector.resolve_channel()
+        connector.publish("Listing")
+        self.assertEqual(len(transport.calls), 2)
+        self.assertTrue(transport.calls[1]["url"].endswith("/sendMessage"))
+        self.assertEqual(transport.calls[1]["body"]["chat_id"], "-1001234567890")
+
+
 class TelegramSendingTest(unittest.TestCase):
     def setUp(self):
         self.transport = FakeTransport()
@@ -403,6 +503,39 @@ class InstagramSendingTest(unittest.TestCase):
             "body": {"recipient": {"id": CUSTOMER}, "message": {"text": "Hello"}}, "timeout": 10.0}])
         self.assertNotIn("access_token", self.transport.calls[0]["url"])
         self.assertNotIn("access_token", self.transport.calls[0]["body"])
+
+    def test_utf8_text_chunks_obey_byte_limit_without_losing_text(self):
+        cases = ["a" * 1000, "a" * 1001, "я" * 500, "я" * 501, "😀" * 251,
+                 "a" * 999 + "я😀é\n  конец", ("Квартира 550$\n" * 200)]
+        for text in cases:
+            with self.subTest(byte_length=len(text.encode("utf-8"))):
+                transport = FakeTransport()
+                InstagramConnector(ACCOUNT, IG_TOKEN, transport=transport).send(CUSTOMER, text)
+                chunks = [call["body"]["message"]["text"] for call in transport.calls]
+                self.assertEqual("".join(chunks), text)
+                self.assertTrue(all(0 < len(chunk.encode("utf-8")) <= 1000 for chunk in chunks))
+                if len(text.encode("utf-8")) == 1000:
+                    self.assertEqual(chunks, [text])
+                for chunk in chunks:
+                    self.assertEqual(chunk.encode("utf-8").decode("utf-8"), chunk)
+
+    def test_multibyte_chunks_precede_attachments_in_original_order(self):
+        text = "Квартира\n" * 200
+        self.connector.send(CUSTOMER, text, (Attachment("photo", PHOTO), Attachment("video", VIDEO)))
+        messages = [call["body"]["message"] for call in self.transport.calls]
+        self.assertGreater(len(messages), 3)
+        self.assertEqual("".join(message["text"] for message in messages[:-2]), text)
+        self.assertTrue(all(len(message["text"].encode("utf-8")) <= 1000 for message in messages[:-2]))
+        self.assertEqual(messages[-2:], [
+            {"attachment": {"type": "image", "payload": {"url": PHOTO}}},
+            {"attachment": {"type": "video", "payload": {"url": VIDEO}}},
+        ])
+        self.assertTrue(all(call["body"]["recipient"] == {"id": CUSTOMER} for call in self.transport.calls))
+
+    def test_invalid_unicode_is_rejected_before_any_send(self):
+        with self.assertRaisesRegex(ValueError, "valid UTF-8"):
+            self.connector.send(CUSTOMER, "a" * 1001 + "\ud800", (Attachment("photo", PHOTO),))
+        self.assertEqual(self.transport.calls, [])
 
     def test_actual_single_image_and_video_attachment_shapes(self):
         self.connector.send(CUSTOMER, "Listing", (Attachment("photo", PHOTO), Attachment("video", VIDEO)))
