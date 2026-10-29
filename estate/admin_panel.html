@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>E-state admin</title>
+<style>body{max-width:1000px;margin:2rem auto;padding:0 1rem;font:16px system-ui;color:#182331}label{display:block;margin:.7rem 0}input{padding:.5rem;max-width:100%;width:25rem}button{padding:.6rem;margin:.3rem}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #ccd3da;text-align:left;padding:.5rem}pre{white-space:pre-wrap}fieldset{margin:1.5rem 0}small{color:#526174}</style>
+<h1>E-state admin</h1>
+<p>Development application. Configured accounts are not live-verified. Credentials are never displayed or saved by this page.</p>
+<form id="login"><label>Admin token <input id="token" type="password" autocomplete="off" required></label><button>Load instances</button></form>
+<p id="status" role="status"></p>
+<table><thead><tr><th>Instance</th><th>Clients served</th><th>Average conversation (s)</th><th>Handovers</th><th>Closed deals</th><th>Actions</th></tr></thead><tbody id="instances"></tbody></table>
+<section id="sessions"></section>
+<fieldset><legend>Create a realtor instance</legend>
+<p>Enter environment-variable <strong>names</strong>, not access tokens. Set their values outside the repository. Leave unused fields blank.</p>
+<form id="create">
+<label>Instance ID <input name="instance_id" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" required></label>
+<label>Realtor name <input name="realtor_name" required></label>
+<label>Realtor contact <input name="realtor_contact"></label>
+<label>Telegram channel (@username or numeric ID) <input name="telegram_channel"></label>
+<label>Instagram account ID (numeric) <input name="instagram_account" inputmode="numeric"></label>
+<label>Listing source <input name="listing_source"></label>
+<label>Telegram token environment name <input name="telegram_token_env" autocomplete="off"></label>
+<label>Instagram token environment name <input name="instagram_token_env" autocomplete="off"></label>
+<label>Webhook verification secret environment name <input name="webhook_secret_env" autocomplete="off"></label>
+<label>Meta app secret environment name <input name="instagram_app_secret_env" autocomplete="off"></label>
+<label>Authorized Telegram realtor user IDs (comma-separated) <input name="telegram_admin_ids"></label>
+<button>Create instance</button>
+</form></fieldset>
+<script>
+'use strict';
+const byId=id=>document.getElementById(id);
+async function api(path,method='GET',data){
+ const headers={Authorization:'Bearer '+byId('token').value};
+ if(data!==undefined)headers['Content-Type']='application/json';
+ const res=await fetch(path,{method,headers,body:data===undefined?undefined:JSON.stringify(data),cache:'no-store'});
+ const value=await res.json(); if(!res.ok)throw Error(value.error||'Request failed');return value;
+}
+function cell(row,text){const td=document.createElement('td');td.textContent=String(text);row.append(td);return td;}
+function status(text){byId('status').textContent=text;}
+async function load(){
+ const instances=await api('/admin/instances');byId('instances').replaceChildren();
+ for(const instance of instances){
+  const result=await api('/admin/instances/'+encodeURIComponent(instance.id)+'/stats');
+  const m=result.metrics,row=document.createElement('tr');
+  for(const value of [instance.id,m.clients_served,Number(m.avg_conversation_seconds).toFixed(2),m.handovers,m.closed_deals])cell(row,value);
+  const actions=cell(row,'');const button=document.createElement('button');button.textContent='Sessions / deals';
+  button.onclick=()=>showSessions(instance.id).catch(error=>status(error.message));actions.append(button);byId('instances').append(row);
+ }
+ status('Loaded '+instances.length+' instances. Metrics reflect recorded application sessions, not unobserved real-world deals.');
+}
+async function showSessions(id){
+ const records=await api('/admin/instances/'+encodeURIComponent(id)+'/sessions');const section=byId('sessions');section.replaceChildren();
+ const title=document.createElement('h2');title.textContent='Sessions: '+id;section.append(title);
+ const table=document.createElement('table');section.append(table);
+ for(const record of records){
+  const row=document.createElement('tr');cell(row,record.session_id);cell(row,record.channel);cell(row,record.client_id);cell(row,record.duration_seconds??'Active');
+  const action=cell(row,record.closed_deal?'Deal recorded':'No deal recorded');
+  if(!record.closed_deal){const button=document.createElement('button');button.textContent='Confirm closed deal';button.onclick=async()=>{
+   if(!confirm('Record an actual closed deal for this session?'))return;
+   try{await api('/admin/instances/'+encodeURIComponent(id)+'/deals','POST',{session_id:record.session_id});await showSessions(id);await load();}catch(error){status(error.message);}
+  };action.append(button);}table.append(row);
+ }
+}
+byId('login').onsubmit=event=>{event.preventDefault();load().catch(error=>status(error.message));};
+byId('create').onsubmit=async event=>{
+ event.preventDefault();const data=Object.fromEntries(new FormData(event.target));data.telegram_admin_ids=data.telegram_admin_ids.split(',').map(x=>x.trim()).filter(Boolean);
+ try{await api('/admin/instances','POST',data);event.target.reset();await load();}catch(error){status(error.message);}
+};
+</script></html>

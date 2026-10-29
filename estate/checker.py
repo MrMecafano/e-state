@@ -9,7 +9,7 @@ import html
 import re
 import unicodedata
 from dataclasses import dataclass
-from urllib.parse import unquote, unquote_plus
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 from .kb import KnowledgeBase
 from .language import normalize_text
@@ -109,6 +109,20 @@ def _asks_money(text: str) -> bool:
     return False
 
 
+def _credential_url(text: str) -> bool:
+    """Inspect URLs in all outgoing prose, not just dedicated media/link fields."""
+    for url in re.findall(r"https?://[^\s<>\"']+", text, re.I):
+        try:
+            parsed = urlsplit(url)
+            if ((parsed.hostname or "").rstrip(".").lower() == "api.telegram.org"
+                    or parsed.username is not None or parsed.password is not None
+                    or re.search(r"[?&](?:access_token|api_key|bot_token)=|/bot[0-9]+:", url, re.I)):
+                return True
+        except ValueError:
+            return True  # Malformed URLs must not bypass the credential gate.
+    return False
+
+
 def check(reply: str, kb: KnowledgeBase, realtor_contact: str = "") -> Verdict:
     reasons: list[str] = []
     texts = {_visible_text(reply), _visible_text(reply, form_encoded=True)}
@@ -123,7 +137,14 @@ def check(reply: str, kb: KnowledgeBase, realtor_contact: str = "") -> Verdict:
             reasons.append(f"{lid} is taken")
         elif not listing.complete:
             reasons.append(f"{lid} has incomplete mandatory fields")
-    phones = {phone for text in texts for phone in _phones(text)}
+    if any(_credential_url(text) for text in texts):
+        reasons.append("reply contains a credential-bearing URL")
+    # Only real, available, complete listing tokens are structural IDs rather
+    # than contacts. Keep all surrounding prose/URLs and ordinary numbers intact.
+    valid_ids = {listing.id.upper() for listing in listings if listing.available and listing.complete}
+    phone_texts = {_ID.sub(lambda match: " " if match.group().upper() in valid_ids else match.group(), text)
+                   for text in texts}
+    phones = {phone for text in phone_texts for phone in _phones(text)}
     allowed = _phones(_visible_text(realtor_contact))
     owners = set()
     for listing in listings:
