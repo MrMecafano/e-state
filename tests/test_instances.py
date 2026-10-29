@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -193,11 +194,166 @@ class PersistentInstanceRegistryTest(unittest.TestCase):
         other.kb.apply_control_message("L-001 taken")
         self.assertEqual(self.registry.all()[0].kb.get("L-001").status, "taken")
 
+    def _overlap_writes(self, instance, operation, first_action, second_action):
+        entered, release = threading.Barrier(2), threading.Barrier(2)
+        attempted = threading.Event()
+        errors = []
+        original = getattr(instance.kb._scope, operation)
+
+        def pause_after_commit(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if threading.current_thread().name == "first":
+                entered.wait(timeout=5)
+                release.wait(timeout=5)
+            return result
+
+        def run(action, second=False):
+            try:
+                if second:
+                    attempted.set()
+                action()
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(instance.kb._scope, operation, side_effect=pause_after_commit):
+            first = threading.Thread(target=run, args=(first_action,), name="first")
+            second = threading.Thread(target=run, args=(second_action, True), name="second")
+            first.start()
+            entered.wait(timeout=5)
+            second.start()
+            self.assertTrue(attempted.wait(timeout=5))
+            # While the first commit is paused, its entire cache update/control
+            # snapshot must remain serialized against every other KB mutation.
+            acquired = instance.kb._lock.acquire(blocking=False)
+            if acquired:
+                instance.kb._lock.release()
+            release.wait(timeout=5)
+            first.join(timeout=5)
+            second.join(timeout=5)
+            self.assertFalse(acquired)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_concurrent_controls_do_not_undo_an_unrelated_listing_status(self):
+        instance = self.create()
+        instance.kb.add(Listing("L-001", "One", "A", 2, 60, 500))
+        instance.kb.add(Listing("L-002", "Two", "A", 2, 60, 500))
+        self._overlap_writes(
+            instance, "set_listing_status",
+            lambda: instance.kb.apply_control_message("L-001 taken"),
+            lambda: instance.kb.apply_control_message("L-002 taken"),
+        )
+        self.assertEqual([listing.status for listing in instance.kb.all()], ["taken", "taken"])
+        self.assertEqual([listing.status for listing in self.store.scope("a").listings()], ["taken", "taken"])
+
+    def test_reader_waits_for_status_commit_and_cache_publication(self):
+        instance = self.create()
+        instance.kb.add(Listing("L-001", "One", "A", 2, 60, 500))
+        committed, publish = threading.Barrier(2), threading.Barrier(2)
+        reader_waiting, read_done = threading.Event(), threading.Event()
+        original_lock = instance.kb._lock
+        original_update = instance.kb._scope.set_listing_status
+        observed, errors = [], []
+
+        class ObservedLock:
+            def __enter__(self):
+                if threading.current_thread().name == "reader":
+                    reader_waiting.set()
+                return original_lock.__enter__()
+
+            def __exit__(self, *args):
+                return original_lock.__exit__(*args)
+
+        def pause_after_commit(*args):
+            original_update(*args)
+            committed.wait(timeout=5)
+            publish.wait(timeout=5)
+
+        def write():
+            try:
+                instance.kb.apply_control_message("L-001 taken")
+            except Exception as exc:
+                errors.append(exc)
+
+        def read():
+            try:
+                observed.append(instance.kb.get("L-001").status)
+                read_done.set()
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(instance.kb, "_lock", ObservedLock()), \
+             patch.object(instance.kb._scope, "set_listing_status", side_effect=pause_after_commit):
+            writer = threading.Thread(target=write, name="writer")
+            reader = threading.Thread(target=read, name="reader")
+            writer.start()
+            committed.wait(timeout=5)
+            reader.start()
+            waiting = reader_waiting.wait(timeout=5)
+            premature_read = read_done.is_set()
+            publish.wait(timeout=5)
+            writer.join(timeout=5)
+            reader.join(timeout=5)
+            self.assertTrue(waiting)
+            self.assertFalse(premature_read)
+            self.assertFalse(writer.is_alive())
+            self.assertFalse(reader.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(observed, ["taken"])
+
+    def test_held_kb_readers_refresh_external_store_changes(self):
+        instance = self.create()
+        self.store.scope("a").upsert_listing(Listing("L-001", "One", "A", 2, 60, 500))
+        self.assertEqual(instance.kb.get("L-001").status, "available")
+        self.store.scope("a").set_listing_status("L-001", "taken")
+        self.assertEqual(instance.kb.all()[0].status, "taken")
+        self.assertEqual(instance.kb.available(), [])
+        self.store.scope("a").set_listing_status("L-001", "available")
+        self.assertEqual(len(instance.kb.available()), 1)
+
+    def test_delayed_ingestion_cache_write_cannot_overwrite_a_control_update(self):
+        instance = self.create()
+        listing = Listing("L-001", "One", "A", 2, 60, 500)
+        instance.kb.add(listing)
+        self._overlap_writes(
+            instance, "upsert_listing", lambda: instance.kb.add(listing),
+            lambda: instance.kb.apply_control_message("L-001 taken"),
+        )
+        self.assertEqual(instance.kb.get("L-001").status, "taken")
+        self.assertEqual(self.store.scope("a").listings()[0].status, "taken")
+
+    def test_control_changes_only_status_and_preserves_stored_video_media(self):
+        instance = self.create()
+        instance.kb.add(Listing("L-001", "Flat", "A", 2, 60, 500))
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE listings SET videos = ? WHERE instance_id = ? AND listing_id = ?",
+                ('["https://example.com/private-tour.mp4"]', "a", "L-001"),
+            )
+        instance.kb.apply_control_message("L-001 taken")
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT status, videos FROM listings WHERE instance_id = ? AND listing_id = ?", ("a", "L-001"),
+            ).fetchone()
+        self.assertEqual(row, ("taken", '["https://example.com/private-tour.mp4"]'))
+
+    def test_reingestion_does_not_reactivate_taken_listing_but_control_can(self):
+        instance = self.create()
+        instance.kb.add(Listing("L-001", "Old title", "A", 2, 60, 500))
+        instance.kb.apply_control_message("L-001 taken")
+        instance.kb.add(Listing("L-001", "Updated title", "A", 2, 60, 600))
+        self.assertEqual(instance.kb.get("L-001").status, "taken")
+        self.assertEqual(instance.kb.get("L-001").title, "Updated title")
+        instance.kb.apply_control_message("L-001 available")
+        self.assertEqual(instance.kb.get("L-001").status, "available")
+
     def test_failed_commits_leave_in_memory_listing_and_status_unchanged(self):
         instance = self.create()
         listing = Listing("L-001", "Flat", "A", 2, 60, 500)
         instance.kb.add(listing)
-        with patch("estate.storage.TenantData.upsert_listing", side_effect=sqlite3.OperationalError("write failed")):
+        with patch("estate.storage.TenantData.upsert_listing", side_effect=sqlite3.OperationalError("write failed")), \
+             patch("estate.storage.TenantData.set_listing_status", side_effect=sqlite3.OperationalError("write failed")):
             with self.assertRaises(sqlite3.OperationalError):
                 instance.kb.add(Listing("L-002", "Other", "A", 2, 60, 500))
             with self.assertRaises(sqlite3.OperationalError):

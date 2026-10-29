@@ -213,7 +213,7 @@ class TenantData:
         self._store = store
         self._instance_id = instance_id
 
-    def upsert_listing(self, listing: Listing) -> None:
+    def upsert_listing(self, listing: Listing, *, preserve_taken: bool = False) -> None:
         if not isinstance(listing, Listing):
             raise TypeError("listing must be a Listing")
         _identifier(listing.id, "listing id")
@@ -232,13 +232,28 @@ class TenantData:
                        rooms = excluded.rooms, area_m2 = excluded.area_m2, rent_usd = excluded.rent_usd,
                        amenities = excluded.amenities, photos = excluded.photos,
                        post_url = excluded.post_url, owner_name = excluded.owner_name,
-                       owner_phone = excluded.owner_phone, status = excluded.status,
+                       owner_phone = excluded.owner_phone,
+                       status = CASE WHEN ? AND listings.status = 'taken'
+                                     THEN 'taken' ELSE excluded.status END,
                        videos = excluded.videos""",
                 (self._instance_id, *(values[key] for key in (
                     "id", "title", "district", "rooms", "area_m2", "rent_usd", "amenities", "photos",
                     "post_url", "owner_name", "owner_phone", "status", "videos",
-                ))),
+                )), preserve_taken),
             )
+
+    def set_listing_status(self, listing_id: str, status: str) -> None:
+        """Change only availability, preserving media/fields unknown to this model."""
+        _identifier(listing_id, "listing id")
+        if status not in ("available", "taken"):
+            raise ValueError("listing status must be available or taken")
+        with self._store._lock, self._store._connection:
+            cursor = self._store._connection.execute(
+                "UPDATE listings SET status = ? WHERE instance_id = ? AND listing_id = ?",
+                (status, self._instance_id, listing_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(listing_id)
 
     def listings(self) -> list[Listing]:
         with self._store._lock:

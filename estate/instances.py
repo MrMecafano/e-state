@@ -7,6 +7,7 @@ changes committed by another registry/process. Credentials are ENV names only.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 from .kb import KnowledgeBase, Listing
@@ -43,25 +44,48 @@ class _StoredKnowledgeBase(KnowledgeBase):
 
     def __init__(self, realtor_id: str, scope: TenantData) -> None:
         self._scope = scope
+        self._lock = threading.RLock()
         super().__init__(realtor_id, scope.listings())
 
     def refresh(self) -> None:
-        self._listings = {listing.id: listing for listing in self._scope.listings()}
+        with self._lock:
+            self._listings = {listing.id: listing for listing in self._scope.listings()}
+
+    def get(self, listing_id: str) -> Listing | None:
+        with self._lock:
+            self.refresh()
+            return super().get(listing_id)
+
+    def all(self) -> list[Listing]:
+        with self._lock:
+            self.refresh()
+            return super().all()
+
+    def available(self) -> list[Listing]:
+        with self._lock:
+            self.refresh()
+            return super().available()
 
     def add(self, listing: Listing) -> None:
-        self._scope.upsert_listing(listing)
-        super().add(listing)
+        with self._lock:
+            # Reimporting a source post must not reactivate a control-marked flat.
+            self._scope.upsert_listing(listing, preserve_taken=True)
+            self.refresh()
 
     def apply_control_message(self, text: str) -> str:
-        self.refresh()
-        # Apply the parser to a temporary KB so a failed commit cannot change the
-        # live in-memory status. Control messages change at most one listing.
-        candidate = KnowledgeBase(self.realtor_id, self.all())
-        result = candidate.apply_control_message(text)
-        for listing in candidate.all():
-            if listing != self.get(listing.id):
-                self.add(listing)
-        return result
+        with self._lock:
+            self.refresh()
+            # Compare against this immutable snapshot, never a concurrent cache.
+            original = {listing.id: listing for listing in self.all()}
+            candidate = KnowledgeBase(self.realtor_id, list(original.values()))
+            result = candidate.apply_control_message(text)
+            for listing in candidate.all():
+                if listing.status != original[listing.id].status:
+                    # A status command cannot overwrite media or other metadata,
+                    # including fields unknown to an older Listing dataclass.
+                    self._scope.set_listing_status(listing.id, listing.status)
+            self.refresh()
+            return result
 
 
 class InstanceRegistry:
